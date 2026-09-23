@@ -240,14 +240,15 @@ class GeoTraxDetector:
 # ---------------------------------------------------------------------------
 # 后处理：时序一致性（剔除孤立误检）
 # ---------------------------------------------------------------------------
-def contour_axis(work: np.ndarray, cx: float, cy: float, w: float, h: float,
+def contour_mask(work: np.ndarray, cx: float, cy: float, w: float, h: float,
                  *, use_hull: bool = True, pad: float = 0.35,
                  min_area_frac: float = 0.02,
-                 max_fore_frac: float = 0.55) -> tuple[float, float] | None:
-    """按"车身 vs 地面"的颜色差分割出车身轮廓，再取主轴。
+                 max_fore_frac: float = 0.55) -> tuple[np.ndarray, float] | None:
+    """按"车身 vs 地面"的颜色差分割出车身掩膜。
 
-    返回 (朝向角, 质量) 或 None（分割失败）。角度是 mod 180 的无向轴，
-    与 `BgSubDetector` 同一约定（见项目规划 §14.7）。
+    返回 (全工作图坐标的 uint8 掩膜, 前景占框面积比) 或 None（分割失败）。
+    `contour_axis` 在它之上取主轴；诊断脚本直接调它把掩膜画出来看病灶 ——
+    分割和取轴是两件事，混在一个函数里就没法单独检查前者。
 
     为什么需要它：背景建模差分拿到的掩膜其实是「车辆移动扫过的月牙形变化带」，
     不是车身轮廓 —— 在月牙上做 PCA，主轴是"车身轴 + 运动方向"的混合物，
@@ -260,7 +261,7 @@ def contour_axis(work: np.ndarray, cx: float, cy: float, w: float, h: float,
     2. 转 Lab 算每个像素与地面色的距离，在框内用 Otsu 自适应定阈值 → 前景；
     3. 只在框内取前景，避免把远处同色物体并进来；
     4. 取离框中心最近、面积达标的连通域；
-    5. 可选凸包填洞（把低饱和的车窗补回车身整体），再 PCA。
+    5. 可选凸包填洞（把低饱和的车窗补回车身整体）。
     """
     fh, fw = work.shape[:2]
     ex = pad * max(w, h)
@@ -341,12 +342,30 @@ def contour_axis(work: np.ndarray, cx: float, cy: float, w: float, h: float,
     if len(xs) < 30:
         return None
 
+    full = np.zeros((fh, fw), np.uint8)
+    full[y0:y1, x0:x1] = mask
+    return full, float(len(xs)) / max(1.0, w * h)
+
+
+def contour_axis(work: np.ndarray, cx: float, cy: float, w: float, h: float,
+                 **kw) -> tuple[float, float] | None:
+    """分割车身轮廓后取主轴，返回 (朝向角, 质量) 或 None。
+
+    角度是 mod 180 的无向轴，与 `BgSubDetector` 同一约定（见项目规划 §14.7）。
+    分割细节见 `contour_mask`。"""
+    got = contour_mask(work, cx, cy, w, h, **kw)
+    if got is None:
+        return None
+    mask, q = got
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 30:
+        return None
     pts = np.stack([xs, ys], 1).astype(np.float32)
     if len(pts) > 2000:
         pts = pts[:: len(pts) // 2000 + 1]
     _, evec = cv2.PCACompute(pts, mean=None)
     axis = float(np.degrees(np.arctan2(evec[0][1], evec[0][0])) % C.BODY_AXIS_MOD)
-    return axis, float(len(xs)) / max(1.0, w * h)
+    return axis, q
 
 
 def filter_temporal(dets: list[Detection], res: PreprocessResult,
