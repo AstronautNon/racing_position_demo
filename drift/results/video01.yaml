@@ -1,0 +1,215 @@
+run:
+  geotrax_version: 1.4.3
+  timestamp: '2026-09-21T17:35:58'
+  source: ../drift/video01.mov
+  config: geotrax/cfg/default.yaml
+  output_folder: ../drift/results
+model:
+  configured: hf://rfonod/geo-trax/geotrax_hbb_yolov8s_1920_v1.pt
+  resolved: /Users/astronaut_non/.cache/huggingface/hub/models--rfonod--geo-trax/snapshots/bfb79e7a29334fc7cec7cfc2eb08fca0cd91d9d5/geotrax_hbb_yolov8s_1920_v1.pt
+class_names:
+  source: model
+  mapping:
+    0: Car
+    1: Bus
+    2: Truck
+    3: Motorcycle
+extraction:
+  class_rename: null
+  stabilize: true
+  save_stab: true
+  min_track_length: 3
+  interpolate: false
+  sahi:
+    enable: false
+    slice_height: 1080
+    slice_width: 1920
+    overlap_height_ratio: 0.2
+    overlap_width_ratio: 0.2
+    perform_standard_pred: true
+    postprocess_type: GREEDYNMM
+    postprocess_match_metric: IOS
+    postprocess_match_threshold: 0.5
+    class_agnostic: true
+  dimension_estimation:
+    gsd: 0.02725
+    eps: 4
+    r0: 1.25
+    theta_bar: 15
+    tau_c:
+      0: 1.83
+      1: 2.85
+      2: 1.7
+      3: 1.8
+      -1: 1.7
+processing:
+  cut_frame_left: 0
+  cut_frame_right: null
+output:
+  folder: results
+  tracks_postfix: ''
+  georeferenced_postfix: ''
+  stab_transform_postfix: _vid_transf
+  geo_transform_postfix: _geo_transf
+  visualization_postfix: ''
+  metadata_postfix: ''
+detection:
+  task: detect
+  mode: track
+  imgsz: 1920
+  device: mps
+  conf: 0.25
+  iou: 0.7
+  max_det: 1000
+  classes:
+  - 0
+  - 1
+  - 2
+  - 3
+  augment: false
+  agnostic_nms: true
+  vid_stride: 1
+  stream_buffer: false
+tracker:
+  active: botsort
+  params:
+    tracker_type: botsort
+    track_high_thresh: 0.25
+    track_low_thresh: 0.1
+    new_track_thresh: 0.25
+    track_buffer: 30
+    match_thresh: 0.8
+    fuse_score: true
+    gmc_method: sparseOptFlow
+    proximity_thresh: 0.5
+    appearance_thresh: 0.8
+    with_reid: false
+    model: auto
+stabilo:
+  clahe: false
+  downsample_ratio: 0.5
+  detector_name: orb
+  max_features: 2000
+  ref_multiplier: 2.0
+  sift_enable_precise_upscale: false
+  rsift_eps: 1.0e-08
+  matcher_name: bf
+  filter_type: ratio
+  filter_ratio: 0.9
+  transformation_type: projective
+  ransac_method: 38
+  ransac_epipolar_threshold: 2.0
+  ransac_max_iter: 5000
+  ransac_confidence: 0.999999
+  mask_use: true
+  mask_margin_ratio: 0.15
+  brisk_threshold: 130
+  kaze_threshold: 0.01
+  akaze_threshold: 0.01
+  loftr_weights: outdoor
+  loftr_confidence: 0.0
+  disk_weights: depth
+  dedode_detector_weights: L-C4-v2
+  dedode_descriptor_weights: B-upright
+  gpu: false
+  gpu_device_id: 0
+  device: auto
+  viz: false
+  benchmark: false
+  min_good_match_count_warning: 20
+  min_inliers_match_count_warning: 10
+georef:
+  transformation:
+    source_crs: epsg:4326
+    target_crs: epsg:5186
+    cutout_width_px: 15000
+  matching:
+    detector_name: rsift
+    matcher_name: bf
+    filter_type: ratio
+    sift_enable_precise_upscale: true
+    downsample_ratio: 1.0
+    max_features: 250000
+    filter_ratio: 0.55
+    ransac_method: 38
+    ransac_epipolar_threshold: 3.0
+    ransac_max_iter: 10000
+    ransac_confidence: 0.999999
+    rsift_eps: 1.0e-08
+    gpu: false
+    gpu_device_id: 0
+    device: auto
+    loftr_weights: outdoor
+    loftr_confidence: 0.0
+    disk_weights: depth
+    dedode_detector_weights: L-C4-v2
+    dedode_descriptor_weights: B-upright
+  filtering:
+    filter_type: gaussian
+    kernel_size: 14
+    min_traj_length: 15
+    visibility_margin: 4
+  processing:
+    ref_frame: 0
+    use_master: true
+    recompute: false
+    geo_source: null
+paths:
+  ortho_folder: null
+  master_folder: null
+  segmentation_folder: null
+visualization:
+  save: true
+  show: false
+  tail_length: 30
+  line_width: 2
+  viz_mode: 0
+  heading_smoothing: 15
+  heading_min_speed: 0.5
+  edge_clip_margin: 3
+  edge_clip_smoothing: 5
+  plot_trajectories: false
+  plot_delay: 30
+  show_conf: false
+  show_lanes: false
+  show_class_names: false
+  hide_labels: false
+  hide_tracks: false
+  hide_speed: false
+  speed_unit: km/h
+  speed_deadzone: 1
+  class_filter: []
+plotting:
+  save: true
+  show: false
+  stationary_speed_cutoff: 1
+  savefig_font_size: 14
+  colors:
+  - '#76b041'
+  - '#3274d9'
+  - '#ff61b4'
+  - '#ff9d00'
+  - '#9954bb'
+  - '#ffc000'
+  - '#e84343'
+  - '#17becf'
+  - '#ef843c'
+  - '#2ca02c'
+  - '#8c564b'
+  - '#e377c2'
+  - '#7f7f7f'
+  - '#bcbd22'
+  - '#1f60c4'
+  - '#a05195'
+  skip_filenames_with:
+  - bus
+  - ids
+  - transf
+  aggregate: false
+  plot_points: false
+  use_segmentations: false
+  class_filter: []
+batch:
+  folders_exclude:
+  - results
+  exclude_patterns: null
