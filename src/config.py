@@ -21,9 +21,13 @@ TRACK_DIR = OUT_DIR / "tracks"
 PLOT_DIR = OUT_DIR / "plots"
 REPORT_DIR = OUT_DIR / "reports"
 ANNOT_DIR = OUT_DIR / "annotations"          # 人工标注（车身轴）落在这里
+ANNOT_QUEUE_DIR = ANNOT_DIR / "queue"        # 待标注帧队列（选帧结果）
+ANNOT_CROP_DIR = ANNOT_DIR / "crops"         # 裁好的待标图（标注台按需生成并缓存）
+ANNOT_WEB_DIR = ANNOT_DIR / "web"            # 离线版标注台导出目录
 CACHE_DIR = OUT_DIR / "cache"
 
-for _d in (PREPROC_DIR, TRACK_DIR, PLOT_DIR, REPORT_DIR, ANNOT_DIR, CACHE_DIR):
+for _d in (PREPROC_DIR, TRACK_DIR, PLOT_DIR, REPORT_DIR, ANNOT_DIR,
+           ANNOT_QUEUE_DIR, ANNOT_CROP_DIR, ANNOT_WEB_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -69,6 +73,51 @@ BG_RESIDUAL_MAX = 0.03
 # 运动学
 SMOOTH_WINDOW = 7          # Savitzky-Golay 窗口（奇数）
 SPEED_MIN_PXS = 3.0        # 速度低于此值(px/s)时航向视为无定义
+
+# ---------------------------------------------------------------------------
+# 人工标注（车身轴）
+# ---------------------------------------------------------------------------
+# 标注预算：按素材的样本量与"朝向精度潜力"分配。
+# video03 车最大（占宽 36.6%）→ 朝向精度潜力最高，值得多标；
+# video12 样本最多（265 帧可用）；video15 有 12% 帧被判位置离群，故少一些。
+ANNOT_QUOTA = {
+    "video12": 55,
+    "video02": 50,
+    "video03": 45,
+    "video15": 35,
+    "video01": 25,
+    "video09": 20,
+}
+ANNOT_BUDGET_DEFAULT = 40          # 未在 ANNOT_QUOTA 里的素材用这个值
+
+# 选帧：贪心最远点采样，特征 = [朝向代理(倍角), 画面位置, 时间, 外观]
+# 权重体现"什么对标注最有价值"：朝向覆盖第一，其次是别把帧都堆在轨迹同一处。
+ANNOT_W_AXIS = 1.00
+ANNOT_W_POS = 0.70
+ANNOT_W_TIME = 0.80
+ANNOT_W_APPEAR = 0.60
+ANNOT_APPEAR_SIZE = 48             # 外观特征缩略图边长
+
+# 选帧质量门槛
+ANNOT_MIN_CONF_FRAC = 0.25         # 置信度须高于"该素材置信度分布的 25 分位"
+ANNOT_MIN_BOX_FRAC = 0.03          # 车框长边须不小于工作图宽度的 3%
+# 车框允许超出画面的幅度（占车框长边的比例）。
+# 不用"距画面边缘留白"，因为检测框会被车身阴影撑大：实测 video15 有 50/62 帧
+# 框越界，但越界幅度中位只有 7.6%、p90 13.1%、max 15.2%，车本身其实在画面内。
+# 按"距边 1%"筛会误杀 43 帧；按"越界幅度 ≤ 10%"筛既保住这些帧，
+# 又仍能剔除车身真被截去大半的情况（剩下 10% 的可见部分仍足以定出车身轴）。
+ANNOT_MAX_OVERHANG = 0.10
+
+# 标注台渲染
+ANNOT_PAD = 1.90                   # 裁图半边长 = PAD/2 × 车框长边（留出上下文）
+ANNOT_DISP_MAX = 1000              # 显示图长边上限（超出则缩小）
+ANNOT_DISP_MIN = 560               # 显示图长边下限（不足则放大，方便点选）
+ANNOT_JPEG_Q = 88
+
+# 人工标注的稀疏插值上限：相邻两个已标帧间隔超过这么多帧就不插值。
+# 车身轴的角速度在稳态漂移下近似恒定，短缺口插值可靠；
+# 缺口太长则"线性转动"这个假设站不住，宁可留 NaN。
+ANNOT_MAX_GAP = 24
 
 # 工作图宽度：统一按"原图宽度一半"缩放，兼顾精度与速度
 WORK_WIDTH_MIN = 640
@@ -187,3 +236,16 @@ def active_static_videos() -> list[VideoSpec]:
 def work_videos() -> list[VideoSpec]:
     """M1 主线处理的素材：静止机位、非搁置。"""
     return active_static_videos()
+
+
+# 默认进入标注队列的素材：静止机位里 role 为 main / special / aux / sample 的。
+# 不含 low（车身仅占宽 3%~5%，朝向标注误差会被放大）与 shelved（待回源 1080p）。
+ANNOT_ROLES = ("main", "special", "aux", "sample")
+
+
+def annotation_videos() -> list[VideoSpec]:
+    return [v for v in static_videos() if v.role in ANNOT_ROLES]
+
+
+def annot_quota(name: str) -> int:
+    return ANNOT_QUOTA.get(name, ANNOT_BUDGET_DEFAULT)

@@ -11,6 +11,15 @@ outputs/cache/
 outputs/**/*.npz
 outputs/**/*.npy
 
+# 标注台的裁图与自包含页面：共约 40 MB，全部可由代码再生成
+#   crops/  用 python -m src.select_frames --all 预生成（约 1 分钟）
+#   web/    用 python -m src.annotate --export --all 生成
+# 但这些**不入库**：
+#   outputs/annotations/queue/*.csv   选帧结果，是标注的可复现基准
+#   outputs/annotations/<名>.csv      人工标注，是真正要保留的劳动成果
+outputs/annotations/crops/
+outputs/annotations/web/
+
 # ---------------------------------------------------------------
 # Python
 # ---------------------------------------------------------------

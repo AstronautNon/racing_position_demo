@@ -172,10 +172,16 @@ def smooth(values: np.ndarray, window: int = C.SMOOTH_WINDOW) -> np.ndarray:
 # 主计算
 # ---------------------------------------------------------------------------
 def compute(dets: list[Detection], res: PreprocessResult,
-            body_axis: np.ndarray | None = None) -> dict:
+            body_axis: np.ndarray | None = None,
+            body_mask: np.ndarray | None = None) -> dict:
     """算出速度矢量、航向 psi_vel，以及滑移角 beta。
 
-    body_axis 若为 None，则用掩膜 PCA 主轴作为基线（噪声大，仅供参考）。
+    body_axis 为 None 时用掩膜 PCA 主轴作基线（噪声大，仅供参考）；
+    否则用给定的人工标注轴。body_mask 标记"哪些帧是真正人工标过的"，
+    其余非空帧视为插值补出来的 —— 二者在图上要分开画，不能混为一谈。
+
+    返回的 axis_kind 逐帧记录轴的来源：
+        0 = 无（NaN）  1 = 人工标注  2 = 人工标注插值  3 = 掩膜 PCA 基线
     """
     s = build_series(dets, res)
     dt = 1.0 / res.eff_fps
@@ -204,10 +210,22 @@ def compute(dets: list[Detection], res: PreprocessResult,
     # 速度过低时航向无定义（静止帧的 atan2 是噪声）
     psi_vel = np.where(speed >= C.SPEED_MIN_PXS, psi_vel, np.nan)
 
-    axis_use = s["axis"] if body_axis is None else np.asarray(body_axis, dtype=float)
-    # 位置被判为离群的帧，其朝向同样不可信，一并置空
+    # 位置被判为离群的帧
     rejected = np.isnan(cx_r) & ~np.isnan(s["cx_raw"])
-    axis_use = np.where(rejected, np.nan, axis_use)
+
+    if body_axis is None:
+        axis_use = s["axis"]
+        # PCA 主轴是从同一个掩膜算出来的，掩膜出错时它一定跟着错，故一并置空
+        axis_use = np.where(rejected, np.nan, axis_use)
+        axis_kind = np.where(np.isnan(axis_use), 0, 3)
+    else:
+        axis_use = np.asarray(body_axis, dtype=float)
+        axis_kind = np.where(np.isnan(axis_use), 0, 2)
+        if body_mask is not None:
+            axis_kind = np.where(np.asarray(body_mask, dtype=bool), 1, axis_kind)
+        # 人工标注是逐帧的目视测量，与位置轨迹的可靠性无关，
+        # 所以**不**按 rejected 置空（车被边缘截断时轴往往仍看得清）。
+
     psi_body = undirected_resolve(axis_use, np.nan_to_num(psi_vel, nan=0.0))
     psi_body = np.where(np.isnan(axis_use), np.nan, psi_body)
 
@@ -221,6 +239,7 @@ def compute(dets: list[Detection], res: PreprocessResult,
     return dict(
         s=s, cx=cx_s, cy=cy_s, vx=vx, vy=vy, speed=speed,
         psi_vel=psi_vel, axis=axis_use, psi_body=psi_body, beta=beta,
+        axis_kind=axis_kind, rejected=rejected,
         dt=dt, size_px=size_px, n_outliers=n_out,
         speed_blps=speed / size_px if size_px and np.isfinite(size_px) else speed * np.nan,
     )
@@ -229,16 +248,26 @@ def compute(dets: list[Detection], res: PreprocessResult,
 # ---------------------------------------------------------------------------
 # 人工标注接口
 # ---------------------------------------------------------------------------
-def load_annotation(name: str, n: int) -> np.ndarray | None:
-    """读取人工标注的车身轴。
+def load_annotation_detail(name: str, n: int) -> dict | None:
+    """读取人工标注的车身轴，并把稀疏标注插值成可用的逐帧序列。
 
-    文件 outputs/annotations/<name>.csv，两列：k(去重序号), axis_deg(度, mod 180)。
-    行可以稀疏，未标注的帧返回 NaN。
+    文件 outputs/annotations/<name>.csv。第 1 列 `k`（去重序号），
+    第 2 列 `axis_deg`（度，mod 180）；以 `#` 开头的行忽略，
+    其余多余列（标注台另外记下的点选坐标等）不影响读取。
+
+    为什么要插值：车身轴的角速度在稳态漂移下近似恒定，人工标 50 帧就能
+    撑起整条曲线。但插值毕竟不是观测，所以：
+
+      - 只在**两个已标帧之间**插值，两端不外推；
+      - 缺口超过 ANNOT_MAX_GAP 帧就不插（"线性转动"的假设撑不住），留 NaN；
+      - 返回的 annotated 掩膜标出哪些帧是真正人工标的，供绘图区分。
+
+    返回 dict(axis=插值后序列, annotated=布尔掩膜, raw=稀疏原值, count=标注帧数)。
     """
     p = C.ANNOT_DIR / f"{name}.csv"
+    raw = np.full(n, np.nan)
     if not p.exists():
         return None
-    arr = np.full(n, np.nan)
     with p.open(newline="") as f:
         for row in csv.reader(f):
             if not row or row[0].strip().startswith("#"):
@@ -248,16 +277,57 @@ def load_annotation(name: str, n: int) -> np.ndarray | None:
                 a = float(row[1])
             except (ValueError, IndexError):
                 continue
-            if 0 <= k < n:
-                arr[k] = a % C.BODY_AXIS_MOD
-    return arr if np.any(~np.isnan(arr)) else None
+            if 0 <= k < n and np.isfinite(a):
+                raw[k] = a % C.BODY_AXIS_MOD
+
+    annotated = ~np.isnan(raw)
+    count = int(annotated.sum())
+    if count == 0:
+        return None
+
+    axis = raw.copy()
+    idx = np.nonzero(annotated)[0]
+    if len(idx) >= 2:
+        for a, b in zip(idx[:-1], idx[1:]):
+            gap = b - a - 1
+            if gap <= 0 or gap > C.ANNOT_MAX_GAP:
+                continue
+            span = np.arange(a + 1, b)
+            # 主轴是 mod 180 的量，用倍角法插值，避免 0/180 附近的跳变被拉成大半圈
+            ra = np.radians(np.array([raw[a], raw[b]]) * 2.0)
+            t = (span - a) / (b - a)
+            re = np.interp(t, [0, 1], np.cos(ra))
+            im = np.interp(t, [0, 1], np.sin(ra))
+            axis[span] = np.degrees(np.arctan2(im, re)) / 2.0 % C.BODY_AXIS_MOD
+
+    return dict(axis=axis, annotated=annotated, raw=raw, count=count)
+
+
+def load_annotation(name: str, n: int) -> np.ndarray | None:
+    """兼容旧接口：只取插值后的轴序列。"""
+    d = load_annotation_detail(name, n)
+    return d["axis"] if d is not None else None
+
+
+def annotate_stats(kin: dict) -> dict:
+    """统计一帧段的轴来源构成，用于报告与绘图。"""
+    kind = kin.get("axis_kind")
+    if kind is None:
+        return dict(annotated=0, interp=0, pca=0, none=0)
+    return dict(annotated=int((kind == 1).sum()), interp=int((kind == 2).sum()),
+                pca=int((kind == 3).sum()), none=int((kind == 0).sum()))
+
+
+AXIS_SRC_NAMES = {0: "none", 1: "annotated", 2: "interp", 3: "pca"}
 
 
 def write_series_csv(path: Path, res: PreprocessResult, kin: dict) -> None:
     """导出逐帧运动学序列，供外部分析与后续标注使用。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = ["k", "frame", "t", "cx", "cy", "vx", "vy", "speed_px_s",
-            "speed_bl_per_s", "psi_vel_deg", "axis_deg", "psi_body_deg", "beta_deg"]
+            "speed_bl_per_s", "psi_vel_deg", "axis_deg", "axis_src",
+            "psi_body_deg", "beta_deg"]
+    kind = kin.get("axis_kind", np.zeros(res.n, dtype=int))
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
@@ -267,6 +337,8 @@ def write_series_csv(path: Path, res: PreprocessResult, kin: dict) -> None:
                 *[("" if not np.isfinite(v) else f"{v:.4f}") for v in (
                     kin["cx"][k], kin["cy"][k], kin["vx"][k], kin["vy"][k],
                     kin["speed"][k], kin["speed_blps"][k],
-                    kin["psi_vel"][k], kin["axis"][k],
+                    kin["psi_vel"][k], kin["axis"][k])],
+                AXIS_SRC_NAMES.get(int(kind[k]), "?"),
+                *[("" if not np.isfinite(v) else f"{v:.4f}") for v in (
                     kin["psi_body"][k], kin["beta"][k])],
             ])

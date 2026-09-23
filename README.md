@@ -13,14 +13,20 @@
 ```bash
 cd demo02
 
-# 跑主线素材（登记的静止机位、未搁置）
+# ① 跑主线素材（登记的静止机位、未搁置）：预处理 + 检测 + 运动方向
 python -m src.pipeline --all-static
+python -m src.pipeline --videos video02 video12 video15      # 指定素材
+python -m src.pipeline --videos video02 --stage preprocess --force   # 只跑某一阶段 / 忽略缓存
 
-# 指定素材
-python -m src.pipeline --videos video02 video12 video15
+# ② 生成待标注队列（按朝向多样性挑帧，并预渲染裁图）
+python -m src.select_frames --all
+python -m src.select_frames --videos video02 --budget 20     # 覆盖默认配额
 
-# 只跑某一阶段 / 忽略缓存重算
-python -m src.pipeline --videos video02 --stage preprocess --force
+# ③ 标注车身轴（浏览器里点两下）
+python -m src.annotate --serve                               # 边点边存，直接落盘
+python -m src.annotate --serve --name video02
+python -m src.annotate --export --all                        # 或导出离线自包含 HTML
+python -m src.annotate --status                              # 只看进度与一致性体检
 ```
 
 ### 产物
@@ -31,8 +37,11 @@ python -m src.pipeline --videos video02 --stage preprocess --force
 | `outputs/tracks/<名>.csv` | 逐帧运动学序列（位置、速度、ψ_vel、β 等），标注也用这个文件的帧号 |
 | `outputs/plots/<名>_kinematics.png` | 轨迹 / 速度 / 航向 / 滑移角 四联图 |
 | `outputs/plots/<名>_detect_check.png` | 检测抽帧目检图（红框=检测框，绿点=质心，黄线=掩膜主轴） |
+| `outputs/plots/<名>_annot_queue.png` | 待标注队列预览（含选帧前后的朝向覆盖对比） |
 | `outputs/reports/M1_报告.md` | 汇总报告（含与 geo-trax 的交叉校验） |
-| `outputs/annotations/<名>.csv` | **人工标注的车身轴**（需要你填），格式见 `outputs/annotations/README.md` |
+| `outputs/annotations/queue/<名>.csv` | 待标注帧队列（选帧结果） |
+| `outputs/annotations/<名>.csv` | **人工标注的车身轴**，格式见 `outputs/annotations/README.md` |
+| `outputs/annotations/web/<名>.html` | 离线版标注台（自包含，图片内嵌） |
 
 ---
 
@@ -40,11 +49,14 @@ python -m src.pipeline --videos video02 --stage preprocess --force
 
 ```
 src/
-  config.py       素材登记表（15 段素材的相机性质、检测分支、裁剪参数、来源分组）
-  preprocess.py   黑边检测与裁剪、重复帧剔除、时间轴重建、背景模型可用性判定
-  detect.py       双分支检测（静止机位背景建模 / 相机运动读 geo-trax）+ 时序过滤
-  kinematics.py   轨迹平滑、速度、航向 ψ_vel、滑移角 β、人工标注接口
-  pipeline.py     命令行入口，串起上面三层并出图出报告
+  config.py         素材登记表（15 段素材的相机性质、检测分支、裁剪参数、来源分组、标注配额）
+  preprocess.py     黑边检测与裁剪、重复帧剔除、时间轴重建、背景模型可用性判定
+  detect.py         双分支检测（静止机位背景建模 / 相机运动读 geo-trax）+ 时序过滤
+  crops.py          待标注裁图的渲染与"显示↔工作图"坐标换算
+  select_frames.py  待标注帧选择（贪心最远点采样）+ 队列预览图
+  annotate.py       标注台（浏览器点两下 / 导出自包含 HTML）+ 标注 CSV 读写
+  kinematics.py     轨迹平滑、速度、航向 ψ_vel、滑移角 β、人工标注接口
+  pipeline.py       命令行入口，串起上面三层并出图出报告
 ```
 
 设计要点都写在对应模块的 docstring 里，下面只列最容易踩的几条。
@@ -116,17 +128,65 @@ ORB + RANSAC 在同一类画面上内点率也会掉到 24%~35%。两者都不�
 
 ---
 
+## 标注：为什么是"选帧 + 点两下"
+
+### 选帧不是随机抽的
+
+`select_frames.py` 用**贪心最远点采样**挑帧，特征四项拼接：
+
+| 特征 | 权重 | 意图 |
+|---|---|---|
+| 朝向代理 `[cos2θ, sin2θ]` | 1.00 | 朝向覆盖第一 |
+| 画面位置 `[cx/W, cy/H]` | 0.70 | 别把帧都堆在轨迹同一处 |
+| 时间 `t/T` | 0.80 | 覆盖整段时长 |
+| 外观 `48×48` 归一化灰度 | 0.60 | 避开几乎一样的画面 |
+
+每轮选出"与已选集合最小距离"最大的候选。效果见
+`outputs/plots/<名>_annot_queue.png` 顶部的直方图：默认候选的朝向分布有尖峰，
+选完之后明显被拉平。四条门槛用来避免浪费标注额度：置信度过低、车框过小、
+位置被判离群、车框贴边的帧都不入选。
+
+### 点两下的原理与实现
+
+标注台（`annotate.py`）在浏览器里把某一帧裁到车辆周围并放大，你**沿车身点两个点**。
+角度是**换算回工作图坐标之后**才算的，因为裁图在两个方向上的缩放比不严格相等，
+直接在显示坐标里算会引入一点各向异性误差。
+
+![标注台界面](outputs/reports/figures/annotator_ui.png)
+
+界面上的绿箭头（运动方向 ψ_vel）是给你判断车头朝哪边用的参考；
+`T` 键可一键采用 PCA 提示轴，但它会记为 `src=hint`，与人工点选的
+`src=manual` 分开存档 —— 都是人工确认的结果，但审计时要能区分。
+
+车身被画面截断的帧会在侧栏给出警示（检测框越出边界，标出来的轴会偏），
+看不清就按 `N` 跳过。
+
+两种模式各有取舍：
+
+| 模式 | 保存方式 | 适用 |
+|---|---|---|
+| `--serve` | 每标一帧 POST 落盘到 `outputs/annotations/<名>.csv` | 推荐，不手工搬文件 |
+| `--export` | 标完点"导出 CSV"下载，再放到 `outputs/annotations/` | 离线、或想换个环境标 |
+
+`--export` 的页面把既有标注一起嵌进载荷，再叠加 localStorage 里的本地改动 ——
+所以重新导出不会丢掉之前标的帧。
+
+---
+
 ## 当前进度与下一步
 
-已完成（M1）：
+已完成：
 
-- [x] 预处理：黑边、去重、时间轴重建、背景可用性判定
-- [x] 双分支检测，且与 geo-trax 交叉校验一致（video02 IoU 中位约 0.88~0.91）
-- [x] 运动方向 ψ_vel、速度曲线、目检图、汇总报告
+- [x] M1 预处理：黑边、去重、时间轴重建、背景可用性判定
+- [x] M1 双分支检测，且与 geo-trax 交叉校验一致（video02 IoU 中位约 0.88~0.91）
+- [x] M1 运动方向 ψ_vel、速度曲线、目检图、汇总报告
+- [x] 标注链路：选帧（朝向多样性）+ 标注台（浏览器点两下）+ 标注 CSV 读写
+- [x] 各素材待标注队列已生成（合计约 230 帧，见 `src/config.py` 的 `ANNOT_QUOTA`）
 
 下一步：
 
-- [ ] **人工标注车身轴**（L4，项目最大难点）
+- [ ] **人工标注车身轴**（L4，项目最大难点）—— 队列与标注台已就绪，等标注结果
+- [ ] 标完之后重跑 `pipeline`，得到完整的 β 曲线（现在 β 用的是 PCA 基线，不可用）
 - [ ] 比例尺标定：用地面已知尺寸（video03 的靶心圆、video13/14 的轮胎痕圆环）
       把 px/s 换算成 m/s
 - [ ] 滑移角 β 的精度评估与盲标误差分析
