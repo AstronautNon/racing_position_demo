@@ -182,6 +182,11 @@ def write_labels(name: str, labels: dict[int, dict]) -> Path:
     p = labels_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".csv.tmp")
+    # 全部撤销后不留空壳文件：无标注 == 无文件，免得 ls 里出现只剩表头的 csv 让人误解
+    if not labels:
+        p.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+        return p
     with tmp.open("w", newline="", encoding="utf-8") as f:
         f.write(f"# {name} 人工标注的车身轴（mod 180 度），由 python -m src.annotate 生成\n")
         f.write("# axis_deg 是唯一被下游读取的字段；x1..y2 是工作图坐标下的原始点选，供复核\n")
