@@ -240,6 +240,115 @@ class GeoTraxDetector:
 # ---------------------------------------------------------------------------
 # 后处理：时序一致性（剔除孤立误检）
 # ---------------------------------------------------------------------------
+def contour_axis(work: np.ndarray, cx: float, cy: float, w: float, h: float,
+                 *, use_hull: bool = True, pad: float = 0.35,
+                 min_area_frac: float = 0.02,
+                 max_fore_frac: float = 0.55) -> tuple[float, float] | None:
+    """按"车身 vs 地面"的颜色差分割出车身轮廓，再取主轴。
+
+    返回 (朝向角, 质量) 或 None（分割失败）。角度是 mod 180 的无向轴，
+    与 `BgSubDetector` 同一约定（见项目规划 §14.7）。
+
+    为什么需要它：背景建模差分拿到的掩膜其实是「车辆移动扫过的月牙形变化带」，
+    不是车身轮廓 —— 在月牙上做 PCA，主轴是"车身轴 + 运动方向"的混合物，
+    系统性偏 7° 左右，而且**调阈值/加权都救不回来**（试过 5 种变体）。
+    改按颜色切车身，主轴立刻贴合人工标注（video09 实测 7.42° → 1.00°）。
+
+    做法（不写死车色，红/蓝/黄车都适用）：
+
+    1. 检测框外扩一圈作分析窗，用**框外**像素的中位数估"地面色"；
+    2. 转 Lab 算每个像素与地面色的距离，在框内用 Otsu 自适应定阈值 → 前景；
+    3. 只在框内取前景，避免把远处同色物体并进来；
+    4. 取离框中心最近、面积达标的连通域；
+    5. 可选凸包填洞（把低饱和的车窗补回车身整体），再 PCA。
+    """
+    fh, fw = work.shape[:2]
+    ex = pad * max(w, h)
+    x0, y0 = int(max(0, cx - w / 2 - ex)), int(max(0, cy - h / 2 - ex))
+    x1, y1 = int(min(fw, cx + w / 2 + ex)), int(min(fh, cy + h / 2 + ex))
+    if x1 - x0 < 12 or y1 - y0 < 12:
+        return None
+    win = work[y0:y1, x0:x1]
+    lab = cv2.cvtColor(win, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    # 框在窗内的位置：框内=车身候选区，框外=地面样本区
+    bx0 = int(max(0, cx - w / 2 - x0))
+    bx1 = int(min(win.shape[1], cx + w / 2 - x0))
+    by0 = int(max(0, cy - h / 2 - y0))
+    by1 = int(min(win.shape[0], cy + h / 2 - y0))
+    if bx1 - bx0 < 6 or by1 - by0 < 6:
+        return None
+    in_box = np.zeros(win.shape[:2], bool)
+    in_box[by0:by1, bx0:bx1] = True
+    if (~in_box).sum() < 50:
+        return None
+
+    ground_lab = np.median(lab[~in_box], axis=0)
+    dist = np.linalg.norm(lab - ground_lab, axis=2)
+    scale = max(1.0, float(dist[in_box].max()))
+    in8 = np.clip(dist / scale * 255.0, 0, 255).astype(np.uint8)
+    # Otsu 只在框内取直方图：框内同时含车身与地面，正是要分开的两类
+    thr, _ = cv2.threshold(in8[in_box].reshape(1, -1), 0, 255,
+                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 检测框来自"月牙掩膜"，普遍比车身大（实测宽/车身核心宽中位 1.18、p90 2.07），
+    # 所以框内地面占比可能过半，Otsu 会低估阈值、把地面和阴影一起划成前景。
+    # 车身在框内不可能占多数，超过上限就按分位数把阈值提到对应位置。
+    thr_min = float(np.percentile(in8[in_box], (1.0 - max_fore_frac) * 100.0))
+    thr = max(thr, thr_min)
+
+    fg_bool = (in8 >= thr) & in_box
+
+    # 再排掉阴影：阴影比地面更暗，且不比地面更饱和（车漆/贴纸通常相反）。
+    # 不做这一步时，车侧的长条阴影会被并进前景，凸包一填就把主轴拽向阴影方向
+    # —— 那正是"月牙掩膜"偏 7° 的同一种错误，只是换了个来源。
+    hsv = cv2.cvtColor(win, cv2.COLOR_BGR2HSV)
+    g_s = float(np.median(hsv[..., 1][~in_box]))
+    g_v = float(np.median(hsv[..., 2][~in_box]))
+    shadow = (hsv[..., 2] < g_v * 0.85) & (hsv[..., 1] < g_s * 1.15)
+    fg = (fg_bool & ~shadow).astype(np.uint8)
+    if fg.sum() < 30:
+        fg = fg_bool.astype(np.uint8)
+
+    kk = max(3, int(round(0.03 * min(w, h))) | 1)
+    fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, np.ones((kk, kk), np.uint8))
+    fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab_l, stats, cents = cv2.connectedComponentsWithStats(fg, 8)
+    if n <= 1:
+        return None
+
+    amin = max(30.0, min_area_frac * w * h)
+    ccx, ccy = cx - x0, cy - y0
+    best, bd = -1, 1e18
+    for j in range(1, n):
+        if stats[j, 4] < amin:
+            continue
+        d = float(np.hypot(cents[j][0] - ccx, cents[j][1] - ccy))
+        if d < bd:
+            bd, best = d, j
+    if best < 0:
+        return None
+
+    mask = (lab_l == best).astype(np.uint8)
+    if use_hull:
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+        hull = np.zeros_like(mask)
+        cv2.fillConvexPoly(hull, cv2.convexHull(max(cnts, key=cv2.contourArea)), 1)
+        mask = hull
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 30:
+        return None
+
+    pts = np.stack([xs, ys], 1).astype(np.float32)
+    if len(pts) > 2000:
+        pts = pts[:: len(pts) // 2000 + 1]
+    _, evec = cv2.PCACompute(pts, mean=None)
+    axis = float(np.degrees(np.arctan2(evec[0][1], evec[0][0])) % C.BODY_AXIS_MOD)
+    return axis, float(len(xs)) / max(1.0, w * h)
+
+
 def filter_temporal(dets: list[Detection], res: PreprocessResult,
                     radius: int = 4, max_resid: float | None = None) -> tuple[list[Detection], int]:
     """剔除与邻域中位轨迹偏离过大的孤立检测点。
