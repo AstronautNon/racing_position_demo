@@ -59,9 +59,10 @@ src/
   kinematics.py     轨迹平滑、速度、航向 ψ_vel、滑移角 β、人工标注接口
   pipeline.py       命令行入口，串起上面三层并出图出报告
 tools/
-  probe_shadow.py       5 种"在掩膜里压阴影"的变体 vs 人工标注（见 §14.7）
-  probe_color_axis.py   月牙掩膜 / 颜色轮廓 / 颜色+凸包 三种轴来源的精度对照
-  probe_shadow_view.py  把掩膜、PCA 轴、人工轴画在一起，用于肉眼找根因
+  probe_shadow.py            5 种"在掩膜里压阴影"的变体 vs 人工标注（见 §14.7）
+  probe_color_axis.py        月牙掩膜 / 颜色轮廓 / 颜色+凸包 三种轴来源的精度对照
+  probe_shadow_view.py       把掩膜、PCA 轴、人工轴画在一起，用于肉眼找根因
+  probe_axis_by_material.py  各素材"轮廓轴 vs 月牙轴"的无人监督筛查，用来排标注优先级
 ```
 
 设计要点都写在对应模块的 docstring 里，下面只列最容易踩的几条。
