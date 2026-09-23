@@ -118,6 +118,42 @@ def _interp_inplace(values: np.ndarray) -> np.ndarray:
     return out
 
 
+AXIS_RESID_WIN_S = 0.5
+
+
+def axis_residual_std(axis: np.ndarray, dt: float,
+                      win_s: float = AXIS_RESID_WIN_S) -> float | None:
+    """车身轴"抖不抖"：去掉平滑趋势后的残差散布（度）。
+
+    为什么不用普通 std，也不用倍角圆 std：车身轴在整段素材里会**真实转过几十度**
+    （video09 约 39°），这两种度量都被真实转动主导，测不出噪声。
+    实测 video09 的 PCA 基线与人工标注的圆 std 是 12.1° vs 11.8° —— 几乎一样，
+    但两者的 β 中位相差 7.15°、且**单向**（基线系统性高估 |β|）。
+    所以"抖不抖"必须先把趋势减掉再量。
+
+    做法：在倍角域（2θ 的 cos/sin）做滑动平均得到趋势（这样 0/180 接缝不会
+    把均值拉成 90°），再看逐帧偏离趋势多少。
+
+    实测（窗口 0.5 s，video09）：PCA 基线 3.8°，人工标注 1.6°。
+    """
+    a = np.asarray(axis, dtype=float)
+    m = np.isfinite(a)
+    if m.sum() < 5:
+        return None
+    win = max(5, int(round(win_s / dt)) | 1)
+    if win > m.sum():
+        win = m.sum() | 1
+    k = np.ones(win) / win
+    w = np.convolve(m.astype(float), k, "same")
+    z = np.radians(2.0 * a)
+    u = np.convolve(np.where(m, np.cos(z), 0.0), k, "same") / np.maximum(w, 1e-9)
+    v = np.convolve(np.where(m, np.sin(z), 0.0), k, "same") / np.maximum(w, 1e-9)
+    trend = np.degrees(np.arctan2(v, u)) / 2.0
+    r = (a - trend) % C.BODY_AXIS_MOD
+    r = np.where(r > 90.0, r - 180.0, r)
+    return float(np.std(r[m]))
+
+
 def reject_pose_outliers(x: np.ndarray, y: np.ndarray,
                          radius: int = 5, sigma: float = 4.0,
                          floor_frac: float = 0.03,

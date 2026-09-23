@@ -51,8 +51,18 @@ def _setup_matplotlib():
 def plot_kinematics(name: str, res: P.PreprocessResult, kin: dict, path: Path) -> None:
     plt = _setup_matplotlib()
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
-    fig.suptitle(f"{name}  运动学曲线（背景建模分支，无人工标注）", fontsize=13)
     t = np.array(res.t)
+
+    # 轴来源逐帧不同，图上的说法必须跟着实际来源走，
+    # 不能写死成「无人工标注 / PCA 基线」—— 否则标完的素材会被误读成占位结果。
+    kind = np.asarray(kin.get("axis_kind", np.zeros(res.n, dtype=int)))
+    n_ann = int((kind == 1).sum())
+    n_int = int((kind == 2).sum())
+    if n_ann or n_int:
+        src_txt = f"车身轴：人工标注 {n_ann} 帧 + 插值 {n_int} 帧"
+    else:
+        src_txt = "车身轴：掩膜 PCA 基线（占位，非结果）"
+    fig.suptitle(f"{name}  运动学曲线（背景建模分支，{src_txt}）", fontsize=13)
 
     ax = axes[0][0]
     sc = ax.scatter(kin["cx"], kin["cy"], c=t, s=6, cmap="viridis")
@@ -87,11 +97,19 @@ def plot_kinematics(name: str, res: P.PreprocessResult, kin: dict, path: Path) -
 
     ax = axes[1][1]
     ax.axhline(0, color="gray", lw=0.8, ls="--")
-    ax.plot(t, kin["beta"], lw=1.2, color="#993C1D")
+    beta = np.asarray(kin["beta"], dtype=float)
+    ax.plot(t, beta, lw=1.2, color="#993C1D", label="β 曲线")
+    # 人工标的帧单独点出来：插值段是「匀速转动」假设推出来的，不能和目视观测平权
+    if n_ann:
+        m = (kind == 1) & np.isfinite(beta)
+        ax.plot(t[m], beta[m], "o", ms=4.5, mfc="none", mec="#185FA5", mew=1.2,
+                ls="none", label=f"人工标注帧（{int(m.sum())}）")
+        ax.legend(fontsize=9, loc="best")
     ax.set_xlabel("t / s")
     ax.set_ylabel("β / 度")
     ax.set_ylim(-90, 90)
-    ax.set_title("滑移角 β（车身轴用掩膜 PCA 基线，噪声大，仅供占位）", fontsize=11)
+    ax.set_title("滑移角 β" + ("" if n_ann else "（车身轴用掩膜 PCA 基线，噪声大，仅供占位）"),
+                 fontsize=11)
     ax.grid(alpha=0.25)
 
     fig.tight_layout()
@@ -178,10 +196,17 @@ def process_one(spec: C.VideoSpec, stage: str = "all", force: bool = False,
     if stage == "detect":
         return rec
 
-    body = K.load_annotation(spec.name, res.n)
-    kin = K.compute(dets, res, body_axis=body)
+    # 必须用 load_annotation_detail 并把 annotated 掩膜一起传下去：
+    # 只传角度序列的话 compute() 无从区分「人工标的」和「插值补的」，
+    # axis_kind 会全部落成 2（插值），CSV 的 axis_src 列就成了假审计。
+    ann = K.load_annotation_detail(spec.name, res.n)
+    body = ann["axis"] if ann else None
+    bmask = ann["annotated"] if ann else None
+    kin = K.compute(dets, res, body_axis=body, body_mask=bmask)
     rec["kin"] = kin
-    rec["annotated"] = body is not None
+    rec["annotated"] = ann is not None
+    rec["annot_count"] = ann["count"] if ann else 0
+    rec["axis_stats"] = K.annotate_stats(kin)
 
     K.write_series_csv(C.TRACK_DIR / f"{spec.name}.csv", res, kin)
     if kin["s"]["covered"] >= 5:
@@ -193,8 +218,18 @@ def process_one(spec: C.VideoSpec, stage: str = "all", force: bool = False,
 # ---------------------------------------------------------------------------
 # 汇总报告
 # ---------------------------------------------------------------------------
-def write_report(records: list[dict]) -> Path:
+def write_report(records: list[dict], partial: bool = False,
+                 missing: list[tuple[str, str]] | None = None) -> Path:
     lines = ["# M1 阶段报告：预处理 + 双分支检测 + 运动方向", ""]
+    if partial:
+        # 跑单个素材时如果照原样写回 M1_报告.md，会把全量汇总冲成只有一行，
+        # 下次打开的人会以为其它素材消失了。局部结果单独成文并显式声明范围。
+        names = "、".join(f"`{r['name']}`" for r in records)
+        lines.append(f"> ⚠ **本报告只覆盖 {len(records)} 段素材（{names}），是局部运行的结果，"
+                     "不是全量汇总。**")
+        lines.append("> 全量报告请跑 `python -m src.pipeline --all-static`；"
+                     "本次结果写在本文件以免覆盖它。")
+        lines.append("")
     lines.append("由 `python -m src.pipeline` 自动生成。本阶段**不需要任何人工标注**，")
     lines.append("产出的是速度与航向曲线，用来先暴露素材本身的跟踪与比例尺问题。")
     lines.append("")
@@ -254,26 +289,46 @@ def write_report(records: list[dict]) -> Path:
 
     lines.append("## 3. 逐素材运动学摘要")
     lines.append("")
-    lines.append("| 素材 | 有效段 | 内部最大缺口 | 位置离群剔除 | 速度 中位/p90 (px/s) | 航向覆盖 | 主轴 std | 标注 |")
+    lines.append("| 素材 | 有效段 | 内部最大缺口 | 位置离群剔除 | 速度 中位/p90 (px/s) | 航向覆盖 | 轴残差 | 标注 |")
     lines.append("|---|---|---|---|---|---|---|---|")
-    for r in records:
-        kin = r.get("kin")
+    for rec in records:
+        kin = rec.get("kin")
         if not kin:
             continue
         s = kin["s"]
         sp = kin["speed"][~np.isnan(kin["speed"])]
-        ax = kin["axis"][~np.isnan(kin["axis"])]
         sp_s = f"{np.median(sp):.0f} / {np.percentile(sp, 90):.0f}" if len(sp) else "-"
-        ax_s = f"{np.std(ax):.0f}°" if len(ax) else "-"
+        # 车身轴在整段里会真实转过几十度，普通 std / 圆 std 都被真实转动主导，
+        # 测不出噪声。用"去掉平滑趋势后的残差散布"才能把 PCA 基线与人工标注拉开。
+        resid = K.axis_residual_std(kin["axis"], kin["dt"])
+        ax_s = f"{resid:.1f}°" if resid is not None else "-"
         span = f"k {s['valid_from']}~{s['valid_to']}"
-        out_s = (f"{kin['n_outliers']}（{kin['n_outliers'] / max(1, r.get('n_det', 1)) * 100:.0f}%）"
+        out_s = (f"{kin['n_outliers']}（{kin['n_outliers'] / max(1, rec.get('n_det', 1)) * 100:.0f}%）"
                  if kin.get("n_outliers") else "0")
-        lines.append(f"| {r['name']} | {span} | {s['max_gap']} 帧 | {out_s} | {sp_s} | "
-                     f"{s['covered']}/{s['n']} | {ax_s} | "
-                     f"{'有' if r.get('annotated') else '无（用 PCA 基线）'} |")
+        st = rec.get("axis_stats") or {}
+        if st.get("annotated"):
+            ann_s = f"{rec.get('annot_count', 0)} 帧人工"
+            if st.get("interp"):
+                ann_s += f" + {st['interp']} 插值"
+        else:
+            ann_s = "无（用 PCA 基线）"
+        lines.append(f"| {rec['name']} | {span} | {s['max_gap']} 帧 | {out_s} | {sp_s} | "
+                     f"{s['covered']}/{s['n']} | {ax_s} | {ann_s} |")
     lines.append("")
     lines.append("> 「位置离群剔除」= 滑动窗口中值法判为偏离主轨迹、已置空并插值补回的帧数。"
                  "用于清掉车被画面边缘截断、掩膜临时并进阴影/杂物造成的假跳点。")
+    lines.append(">")
+    lines.append("> 「轴残差」= 车身轴**去掉平滑趋势后**的残差标准差（0.5 s 窗口，在倍角域做平滑）。"
+                 "**不能用普通 std 或圆 std 代替**：车身轴在一段素材里会真实转过几十度，"
+                 "那两种度量都被真实转动主导 —— 实测 video09 的 PCA 基线与人工标注圆 std "
+                 "是 12.1° vs 11.8°（几乎一样），但两者的 β 中位相差 7.15° 且方向一致，"
+                 "是**系统性偏差**而非随机噪声。")
+    lines.append(">")
+    lines.append("> 该列只量「抖动」：video09 标注前的 PCA 基线为 3.8°，标注后为 1.6°。"
+                 "拆开看，**人工帧残差 1.83°**（≈ 目视点两下的精度），"
+                 "插值帧仅 0.13° —— 但插值段平滑是**按构造成立**的（倍角线性插值本身连续），"
+                 "**不能反过来当作「插值很准」的证据**。所以该列衡量的是「轴序列抖不抖」，"
+                 "不等于人工点选精度，更不等于 β 的精度。")
     lines.append("")
 
     lines.append("## 4. 已知局限（M1 未解决）")
@@ -294,7 +349,13 @@ def write_report(records: list[dict]) -> Path:
     lines.append("")
     lines.append("## 5. 需要人工介入的事")
     lines.append("")
-    lines.append("1. **车身朝向 ψ_body 必须人工标注。** 本阶段的 β 曲线用的是掩膜 PCA 主轴，")
+    done = [r for r in records if r.get("annot_count")]
+    if done:
+        lines.append("标注进度：" + "、".join(
+            f"`{r['name']}` {r['annot_count']} 帧" for r in done)
+            + "（逐帧来源见上表「标注」列与 `outputs/tracks/<素材名>.csv` 的 `axis_src`）。")
+        lines.append("")
+    lines.append("1. **车身朝向 ψ_body 必须人工标注。** 尚未标注的素材，其 β 曲线用的是掩膜 PCA 主轴，")
     lines.append("   而车辆阴影会并进掩膜，使主轴标准差普遍偏大，**不可当结果使用**。")
     lines.append("   标注文件格式见 `outputs/annotations/README.md`。")
     lines.append("2. **比例尺尚未标定。** 速度目前是 px/s。要换算成 m/s，需要地面已知尺寸"
@@ -308,7 +369,18 @@ def write_report(records: list[dict]) -> Path:
         ws = r["preprocess"].warnings
         if ws:
             lines.append(f"- **{r['name']}**：" + "；".join(ws))
-    path = C.REPORT_DIR / "M1_报告.md"
+    lines.append("")
+    if missing:
+        lines.append("## 7. 本次未跑到的素材")
+        lines.append("")
+        lines.append("以下素材在本次运行时**源文件不在 `drift/`**，表中因此没有它们的行。")
+        lines.append("它们此前生成的 `outputs/tracks/*.csv` 与曲线图仍在磁盘上，"
+                     "但**可能已与最新代码不一致**，不要当作本次结果引用。")
+        lines.append("")
+        for n, why in missing:
+            lines.append(f"- **{n}**：{why}")
+        lines.append("")
+    path = C.REPORT_DIR / ("M1_报告_局部.md" if partial else "M1_报告.md")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -373,10 +445,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"处理 {len(specs)} 段素材，阶段：{args.stage}")
     print("=" * 100)
     records = []
+    missing = []
     for spec in specs:
         print(f"\n[{spec.name}] role={spec.role} 分支={spec.detector}")
         try:
             rec = process_one(spec, stage=args.stage, force=args.force, verbose=args.verbose)
+        except FileNotFoundError as e:
+            # 素材文件不在（改名/误删）时别静默跳过：报告里要留下痕迹，
+            # 否则表格少一行没人会发现，旧产物还会被误当成最新结果。
+            print(f"  [缺失] {e}")
+            missing.append((spec.name, str(e)))
+            continue
         except Exception as e:
             print(f"  失败：{type(e).__name__}: {e}")
             continue
@@ -401,8 +480,12 @@ def main(argv: list[str] | None = None) -> int:
                           f"（{np.median(sp) / kin['size_px']:.2f} 车长/秒）")
 
     if records and args.stage == "all":
-        rp = write_report(records)
-        print(f"\n汇总报告：{rp.relative_to(C.ROOT)}")
+        full = {s.name for s in C.active_static_videos()}
+        partial = {s.name for s in specs} != full
+        rp = write_report(records, partial=partial, missing=missing)
+        print(f"\n汇总报告：{rp.relative_to(C.ROOT)}" + ("（局部，未覆盖全量报告）" if partial else ""))
+        if missing:
+            print("未跑到的素材：" + "、".join(n for n, _ in missing))
     return 0
 
 
