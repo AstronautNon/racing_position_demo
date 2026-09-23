@@ -254,8 +254,8 @@ def write_report(records: list[dict]) -> Path:
 
     lines.append("## 3. 逐素材运动学摘要")
     lines.append("")
-    lines.append("| 素材 | 有效段 | 内部最大缺口 | 速度 中位/p90 (px/s) | 航向覆盖 | 主轴 std | 标注 |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| 素材 | 有效段 | 内部最大缺口 | 位置离群剔除 | 速度 中位/p90 (px/s) | 航向覆盖 | 主轴 std | 标注 |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for r in records:
         kin = r.get("kin")
         if not kin:
@@ -266,9 +266,14 @@ def write_report(records: list[dict]) -> Path:
         sp_s = f"{np.median(sp):.0f} / {np.percentile(sp, 90):.0f}" if len(sp) else "-"
         ax_s = f"{np.std(ax):.0f}°" if len(ax) else "-"
         span = f"k {s['valid_from']}~{s['valid_to']}"
-        lines.append(f"| {r['name']} | {span} | {s['max_gap']} 帧 | {sp_s} | "
+        out_s = (f"{kin['n_outliers']}（{kin['n_outliers'] / max(1, r.get('n_det', 1)) * 100:.0f}%）"
+                 if kin.get("n_outliers") else "0")
+        lines.append(f"| {r['name']} | {span} | {s['max_gap']} 帧 | {out_s} | {sp_s} | "
                      f"{s['covered']}/{s['n']} | {ax_s} | "
                      f"{'有' if r.get('annotated') else '无（用 PCA 基线）'} |")
+    lines.append("")
+    lines.append("> 「位置离群剔除」= 滑动窗口中值法判为偏离主轨迹、已置空并插值补回的帧数。"
+                 "用于清掉车被画面边缘截断、掩膜临时并进阴影/杂物造成的假跳点。")
     lines.append("")
 
     lines.append("## 4. 已知局限（M1 未解决）")
@@ -277,12 +282,15 @@ def write_report(records: list[dict]) -> Path:
     lines.append("   会连成同一个连通域，把框撑大并让质心偏向阴影一侧。")
     lines.append("   目前已用「按差异强度加权的质心」压制（比取掩膜像素质心稳），但没有根治。")
     lines.append("   后果：框尺寸偏大、质心有随车体转动而摆动的小残差 → 速度曲线上有毛刺。")
-    lines.append("2. **video15 疑似加速片段。** 相邻帧位移实测达 110~167 px（约 1 个车身长），")
-    lines.append("   物理上不可能，判断为原片被加速过。它的速度曲线在视频时间轴上是自洽的，")
-    lines.append("   但**不可与真实时间下的速度比较**。")
-    lines.append("3. **video12 的背景模型处于临界状态**（残留差异约 4%，超过 3% 阈值）。")
-    lines.append("   相机在 16.5 s 内缓慢漂移约 23 px，滚动背景只能缓解不能消除，")
-    lines.append("   轨迹跳点比（逐帧位移 p95/p50）约 5~7，明显高于 video02 的 1.7。")
+    lines.append("2. **video15 有 12% 的帧被判为位置离群。** 剔除后速度曲线从 p90 2168 px/s "
+                 "降到 215 px/s（10 倍），说明原来的尖峰主要是假跳点。")
+    lines.append("   但**这 12% 究竟是「检测被车身阴影带偏」还是「原片本身有快动作段落」，"
+                 "目前尚未区分**。")
+    lines.append("   在人工逐帧看一遍之前，不要引用 video15 的速度绝对值。")
+    lines.append("3. **video12 的轨迹仍不稳。** 位置离群只剔掉 3%，但逐帧位移的 p95/p50 仍达 19"
+                 "（video02 为 1.8）。")
+    lines.append("   背景模型残留差异约 4%（超过 3% 阈值）：相机在 16.5 s 内缓慢漂移约 23 px，")
+    lines.append("   滚动背景只能缓解不能消除。这段素材的检测结果目前只适合看趋势，不适合做定量评估。")
     lines.append("")
     lines.append("## 5. 需要人工介入的事")
     lines.append("")

@@ -80,6 +80,7 @@ def build_series(dets: list[Detection], res: PreprocessResult) -> dict:
     idx = np.nonzero(has)[0]
     gaps = np.diff(idx) - 1 if len(idx) > 1 else np.array([0])
     max_gap = int(gaps.max()) if len(gaps) else 0
+    cx_raw, cy_raw = cx.copy(), cy.copy()
 
     # 只在检测范围内插值，两端不出外推
     if len(idx) >= 2:
@@ -97,12 +98,55 @@ def build_series(dets: list[Detection], res: PreprocessResult) -> dict:
             im = np.interp(span, idx, np.sin(rad))
             axis[lo:hi + 1] = np.degrees(np.arctan2(im, re)) / 2.0 % 180.0
 
-    interp_frac = 0.0  # 占位，见返回字典中的 covered/n
     covered = int(np.sum(has))
-    return dict(cx=cx, cy=cy, axis=axis, conf=conf, area=area,
+    return dict(cx=cx, cy=cy, cx_raw=cx_raw, cy_raw=cy_raw,
+                axis=axis, conf=conf, area=area,
                 covered=covered, n=n, max_gap=max_gap,
                 valid_from=int(idx[0]) if len(idx) else -1,
                 valid_to=int(idx[-1]) if len(idx) else -1)
+
+
+def _interp_inplace(values: np.ndarray) -> np.ndarray:
+    """对内部缺口做线性插值，两端不外推。"""
+    out = values.copy()
+    idx = np.nonzero(~np.isnan(out))[0]
+    if len(idx) < 2:
+        return out
+    lo, hi = idx[0], idx[-1]
+    span = np.arange(lo, hi + 1)
+    out[lo:hi + 1] = np.interp(span, idx, out[idx])
+    return out
+
+
+def reject_pose_outliers(x: np.ndarray, y: np.ndarray,
+                         radius: int = 5, sigma: float = 4.0,
+                         floor_frac: float = 0.03,
+                         work_width: float = 960.0) -> tuple[np.ndarray, np.ndarray, int]:
+    """剔除轨迹上的离群点（车被画面边缘截断、掩膜临时并进阴影/杂物等）。
+
+    做法：用滑动窗口中值得到一条鲁棒轨迹，残留超过
+    `max(floor_frac * 画面宽, sigma * 残留中位数)` 的点判为离群，
+    置为 NaN，交给后续的插值补齐。
+
+    先做这一步再做 Savitzky-Golay 平滑，否则单个离群点会把整个平滑窗口带偏，
+    在速度曲线上制造出上万个 px/s 的假尖峰。
+    """
+    n = len(x)
+    if n < 7:
+        return x, y, 0
+    xs, ys = x.copy(), y.copy()
+    valid = ~np.isnan(xs)
+    rx, ry = np.full(n, np.nan), np.full(n, np.nan)
+    for i in range(n):
+        lo, hi = max(0, i - radius), min(n, i + radius + 1)
+        rx[i] = np.nanmedian(xs[lo:hi])
+        ry[i] = np.nanmedian(ys[lo:hi])
+    resid = np.hypot(xs - rx, ys - ry)
+    thr = max(floor_frac * work_width, sigma * np.nanmedian(resid))
+    bad = valid & (resid > thr)
+    xs[bad] = np.nan
+    ys[bad] = np.nan
+    return xs, ys, int(bad.sum())
 
 
 def smooth(values: np.ndarray, window: int = C.SMOOTH_WINDOW) -> np.ndarray:
@@ -134,9 +178,14 @@ def compute(dets: list[Detection], res: PreprocessResult,
     body_axis 若为 None，则用掩膜 PCA 主轴作为基线（噪声大，仅供参考）。
     """
     s = build_series(dets, res)
-    cx, cy = s["cx"], s["cy"]
     dt = 1.0 / res.eff_fps
 
+    # 1) 先剔离群点，再插值补齐，最后平滑。顺序不能换：
+    #    离群点先平滑会被窗口摊开成一整段假轨迹，在速度曲线上形成巨大尖峰。
+    cx_r, cy_r, n_out = reject_pose_outliers(
+        s["cx_raw"], s["cy_raw"], work_width=float(res.work_size[0]))
+    cx = _interp_inplace(cx_r)
+    cy = _interp_inplace(cy_r)
     cx_s = smooth(cx)
     cy_s = smooth(cy)
 
@@ -156,6 +205,9 @@ def compute(dets: list[Detection], res: PreprocessResult,
     psi_vel = np.where(speed >= C.SPEED_MIN_PXS, psi_vel, np.nan)
 
     axis_use = s["axis"] if body_axis is None else np.asarray(body_axis, dtype=float)
+    # 位置被判为离群的帧，其朝向同样不可信，一并置空
+    rejected = np.isnan(cx_r) & ~np.isnan(s["cx_raw"])
+    axis_use = np.where(rejected, np.nan, axis_use)
     psi_body = undirected_resolve(axis_use, np.nan_to_num(psi_vel, nan=0.0))
     psi_body = np.where(np.isnan(axis_use), np.nan, psi_body)
 
@@ -169,7 +221,7 @@ def compute(dets: list[Detection], res: PreprocessResult,
     return dict(
         s=s, cx=cx_s, cy=cy_s, vx=vx, vy=vy, speed=speed,
         psi_vel=psi_vel, axis=axis_use, psi_body=psi_body, beta=beta,
-        dt=dt, size_px=size_px,
+        dt=dt, size_px=size_px, n_outliers=n_out,
         speed_blps=speed / size_px if size_px and np.isfinite(size_px) else speed * np.nan,
     )
 
