@@ -58,10 +58,11 @@ def candidate_frames(spec: C.VideoSpec, res: P.PreprocessResult,
                      dets: list[D.Detection], kin: dict) -> list[D.Detection]:
     """挑出"值得标、也标得准"的帧。
 
-    四条门槛，每条都是为了不浪费标注额度：
+    五条门槛，每条都是为了不浪费标注额度：
       - 置信度低于该素材 25 分位 → 掩膜本身可疑，框未必在车上；
       - 车框太短（< 工作图宽的 3%）→ 点选误差会被放大，标了也不准；
       - 位置被判过离群 → 轨迹不可信，说明这一帧检测出了问题；
+      - **车框宽高比 > ANNOT_MAX_BOX_ASPECT → 掩膜是运动月牙带而不是车**；
       - 车框超出画面太多（超过框长边的 ANNOT_MAX_OVERHANG）→ 车被截断，车身轴看不全。
 
     最后一条**不**用"距边缘留白"来判。检测框会被车身阴影撑大（实测 v15 框宽
@@ -86,6 +87,10 @@ def candidate_frames(spec: C.VideoSpec, res: P.PreprocessResult,
         if 0 <= d.k < len(rejected) and rejected[d.k]:
             continue
         if not (np.isfinite(d.cx) and np.isfinite(d.cy)):
+            continue
+        # 宽高比超限 ⇒ 掩膜是"运动月牙带"而不是车（见 C.ANNOT_MAX_BOX_ASPECT）。
+        # 放在越界判定之前：月牙带的框又长又低，越界与否已无意义。
+        if max(d.w, d.h) > C.ANNOT_MAX_BOX_ASPECT * max(1.0, min(d.w, d.h)):
             continue
         x1, y1, x2, y2 = d.bbox
         overhang = max(0.0, -x1, -y1, x2 - ww, y2 - wh)
@@ -130,9 +135,65 @@ def _appearance(spec: C.VideoSpec, res: P.PreprocessResult,
 # ---------------------------------------------------------------------------
 # 贪心最远点采样
 # ---------------------------------------------------------------------------
+def _fill_gaps(sel: list[int], cands: list[D.Detection], dist_to,
+               max_gap: int) -> tuple[list[int], list[float], list[tuple[int, int]]]:
+    """补上超过 max_gap 的空洞。
+
+    返回 (新 sel, 新增帧的 gain, 无法补的空洞 [(k_a, k_b), ...])。
+
+    为什么需要单独一步：最远点采样（farthest point sampling）只优化"朝向多样性"，
+    完全不知道下游插值器有最大间隔约束。一段朝向变化平缓（但车子确实在动的）区间
+    对"多样性"贡献小，会被整段跳掉 —— 而那正是需要锚点的地方。
+
+    实测 video12：k 9→65 与 114→171 各断 56/57 帧，区间检出率 100%、
+    帧间差异中位 1.49（其余区间 1.16，反而更大），且 k=9 的提示轴 177.7°
+    到 k=65 的 58.0° 差了约 60° —— 信息确实丢了，不是"那里没内容"。
+
+    补法：反复找当前**最大**的超限间隔，在它内部挑"离已选帧最远"的那一帧插入
+    （与主循环同一准则），直到所有间隔 ≤ max_gap。
+
+    预算处理：**覆盖优先**，允许结果超过 budget —— 静默留洞（下游 β 整段为空）
+    比多标几帧危险得多。超出量由调用方报出来。
+    区间内没有候选（检出中断）时无法补，记入第三项返回。
+    """
+    ks = np.array([d.k for d in cands])
+    gains_add: list[float] = []
+    blocked: list[tuple[int, int]] = []
+    if max_gap <= 0:
+        return sel, gains_add, blocked
+
+    while True:
+        order = sorted(sel, key=lambda i: ks[i])
+        worst = None
+        for a, b in zip(order[:-1], order[1:]):
+            gap = int(ks[b] - ks[a])
+            if gap <= max_gap or (int(ks[a]), int(ks[b])) in blocked:
+                continue
+            if worst is None or gap > worst[0]:
+                worst = (gap, a, b)
+        if worst is None:
+            return sel, gains_add, blocked
+        _, a, b = worst
+        inside = [i for i in range(len(cands)) if ks[a] < ks[i] < ks[b]]
+        if not inside:
+            blocked.append((int(ks[a]), int(ks[b])))
+            continue
+        gains = [min(dist_to(i, j) for j in sel) for i in inside]
+        best = inside[int(np.argmax(gains))]
+        gains_add.append(float(max(gains)))
+        sel = sel + [best]
+
+
 def greedy_select(cands: list[D.Detection], res: P.PreprocessResult,
-                  kin: dict, app: np.ndarray, budget: int) -> tuple[list[int], np.ndarray]:
-    """返回（按选取顺序排列的候选下标, 每次选取时的最小距离）。"""
+                  kin: dict, app: np.ndarray, budget: int,
+                  *, max_gap: int | None = None, verbose: bool = False,
+                  name: str = "") -> tuple[list[int], np.ndarray]:
+    """返回（按选取顺序排列的候选下标, 每次选取时的最小距离）。
+
+    max_gap 非 None 时，在最远点采样之后再跑一遍 `_fill_gaps` 补齐空洞
+    （见该函数说明）。补进来的帧排在最后，prio 因此更大 —— 队列里"越靠后越次要"
+    的既有语义不变，但**补进来的帧不能跳过**：它们就是用来堵洞的，跳过就白补了。
+    """
     m = len(cands)
     budget = min(budget, m)
     if budget <= 0:
@@ -168,6 +229,23 @@ def greedy_select(cands: list[D.Detection], res: P.PreprocessResult,
             d = dist_to(i, nxt)
             if d < mind[i]:
                 mind[i] = d
+
+    n_diverse = len(sel)
+    if max_gap is None:
+        max_gap = C.ANNOT_SELECT_MAX_GAP
+    sel, extra, blocked = _fill_gaps(sel, cands, dist_to, max_gap)
+    gains.extend(extra)
+
+    over = max(0, len(sel) - budget)
+    if over and verbose:
+        print(f"  [{name}] 覆盖优先：为满足最大间隔 {max_gap} 帧，"
+              f"队列从配额 {budget} 扩到 {len(sel)} 帧（超 {over} 帧，请一并标注）")
+    if blocked and verbose:
+        print(f"  [{name}] 有 {len(blocked)} 个间隔区间内无候选（检出中断），无法补齐："
+              + ", ".join(f"k{a}→k{b}" for a, b in blocked))
+    if verbose and len(sel) > n_diverse:
+        print(f"  [{name}] 最远点采样选出 {n_diverse} 帧，"
+              f"覆盖修复补入 {len(sel) - n_diverse} 帧")
     return sel, np.array(gains)
 
 
@@ -178,8 +256,69 @@ QUEUE_COLS = ["k", "frame", "t", "cx", "cy", "w", "h", "conf",
               "hint_axis_deg", "psi_vel_deg", "speed_blps", "prio", "img"]
 
 
+def _queue_ks(name: str) -> list[int]:
+    """读已有队列的 k 列表（不存在或读不了则返回空）。"""
+    p = C.ANNOT_QUEUE_DIR / f"{name}.csv"
+    if not p.exists():
+        return []
+    try:
+        with p.open(newline="", encoding="utf-8") as f:
+            rows = [r for r in csv.reader(f)
+                    if r and not r[0].lstrip().startswith("#")]
+    except OSError:
+        return []
+    out: list[int] = []
+    for row in rows[1:]:                     # 跳过表头
+        if not row:
+            continue
+        try:
+            out.append(int(float(row[0])))
+        except ValueError:
+            continue
+    return out
+
+
+def _labeled_ks(name: str) -> set[int]:
+    """已标注的 k 集合。直接读 CSV，不走 annotate，避免循环导入。"""
+    p = C.ANNOT_DIR / f"{name}.csv"
+    if not p.exists():
+        return set()
+    try:
+        with p.open(newline="", encoding="utf-8") as f:
+            rows = [r for r in csv.reader(f)
+                    if r and not r[0].lstrip().startswith("#")]
+    except OSError:
+        return set()
+    out: set[int] = set()
+    for row in rows[1:]:
+        if not row:
+            continue
+        try:
+            out.add(int(float(row[0])))
+        except ValueError:
+            continue
+    return out
+
+
 def build_queue(name: str, budget: int | None = None, force: bool = False,
-                make_sheet: bool = True, verbose: bool = True) -> dict:
+                make_sheet: bool = True, verbose: bool = True,
+                rewrite: bool = False) -> dict:
+    # 已完成标注的队列**冻结**，一帧都不动。
+    #
+    # 为什么需要这条：选帧参数（质量门槛、权重、配额）以后必然会调，每次调都可能
+    # 选出不同的帧集。若照常重写，会出现"旧帧被挤出队列、队列里混进没标过的新帧"，
+    # 于是 `--status` 把已完成的素材显示成未完成，还要人把同一段再标一遍 ——
+    # 实测过一次：加了宽高比门槛后，video03 与 video12 各有 7 个已标帧被挤出队列，
+    # 进度从 45/45、55/55 掉到 38/45、48/56（标注数据本身没丢，但队列不再对应人工作品）。
+    # 已完成的人工成果不该被算法顺手改掉；要重选请显式 `--rewrite` 或删掉队列文件。
+    prev_ks = _queue_ks(name)
+    if prev_ks and not rewrite and set(prev_ks) <= _labeled_ks(name):
+        if verbose:
+            print(f"  {name}: 队列 {len(prev_ks)} 帧已全部标注 → 保持不变"
+                  f"（要重选加 --rewrite）")
+        return dict(name=name, n_cand=None, n_sel=len(prev_ks), frozen=True,
+                    sel=prev_ks, queue=C.ANNOT_QUEUE_DIR / f"{name}.csv")
+
     spec = C.get(name)
     res = P.preprocess(spec)
     dets, _ = D.run_detection(spec, res)
@@ -192,8 +331,36 @@ def build_queue(name: str, budget: int | None = None, force: bool = False,
 
     budget = C.annot_quota(name) if budget is None else budget
     app = _appearance(spec, res, [d.k for d in cands])
-    sel, gains = greedy_select(cands, res, kin, app, budget)
+    sel, gains = greedy_select(cands, res, kin, app, budget,
+                               verbose=verbose, name=name)
+    n_greedy = len(sel)
     sel_cands = [cands[i] for i in sel]
+
+    # 与旧队列取并集：**绝不因为采样参数变了就把旧帧丢掉**。
+    # 旧帧里可能有已经人工标注的（哪怕这一帧没通过新门槛 —— 人能看见车、
+    # 检测器看不见，正是需要人工的原因）。丢掉它等于把人的劳动判为无效，
+    # 还会让 --status 把已标过的帧报成"未标"。
+    # 只并"曾进过队列"的帧，不会把新门槛挡掉的候选混进来影响本次选择。
+    have = {d.k for d in sel_cands}
+    all_det = {d.k: d for d in dets}
+    merged: list[D.Detection] = []
+    for k in prev_ks:
+        if k in have:
+            continue
+        d = all_det.get(k)
+        if d is None:
+            if verbose:
+                print(f"  [{name}] 旧队列帧 k={k} 已无检出，无法并入（其标注仍供管线使用）")
+            continue
+        merged.append(d)
+        have.add(k)
+    if merged and verbose:
+        print(f"  [{name}] 并入 {len(merged)} 个旧队列帧"
+              f"（k={merged[0].k}…{merged[-1].k}），避免重复标注")
+    sel_cands = sel_cands + merged
+    # 贪心幅度曲线只对应"本次新选出"的部分：并集帧不是按该准则选出来的，
+    # 混进去会让对数轴出现 log(0)。
+    gains = gains[:n_greedy]
 
     qp = C.ANNOT_QUEUE_DIR / f"{name}.csv"
     with qp.open("w", newline="", encoding="utf-8") as f:
@@ -201,6 +368,16 @@ def build_queue(name: str, budget: int | None = None, force: bool = False,
         w.writerow([f"# {name} 待标注队列，由 python -m src.select_frames 生成"])
         w.writerow([f"# 共 {len(sel)} 帧（候选 {len(cands)}），按选取顺序排列；"
                     f"hint_axis_deg 是掩膜 PCA 主轴，仅作粗初值，不可当结果"])
+        w.writerow([f"# 采样准则：最远点采样保证朝向多样性，再补帧保证相邻间隔"
+                    f" ≤ {C.ANNOT_SELECT_MAX_GAP} 帧（插值上限 {C.ANNOT_MAX_GAP} 的 75%）。"
+                    f"**补进来的帧排在队列末尾（prio 最大），但必须标** —— 跳过就留空洞"])
+        w.writerow([f"# 质量门槛：置信度 > 25 分位、框长边 ≥ {C.ANNOT_MIN_BOX_FRAC:.0%} 工作图宽、"
+                    f"宽高比 ≤ {C.ANNOT_MAX_BOX_ASPECT:.1f}（超过就是运动月牙带而不是车）、"
+                    f"越界幅度 ≤ {C.ANNOT_MAX_OVERHANG:.0%} 框长边、位置未判离群"])
+        if merged:
+            w.writerow([f"# 末尾 {len(merged)} 帧是旧队列保留下来的（k="
+                        f"{','.join(str(d.k) for d in merged)}）："
+                        f"已标过的帧一律不丢弃"])
         w.writerow(QUEUE_COLS)
         for prio, d in enumerate(sel_cands):
             sp = kin["speed"][d.k]
@@ -329,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--all", action="store_true", help="所有登记为可标注的素材")
     ap.add_argument("--budget", type=int, default=None, help="覆盖登记的配额")
     ap.add_argument("--force", action="store_true", help="忽略裁图与特征缓存")
+    ap.add_argument("--rewrite", action="store_true",
+                    help="允许重写已完成标注的队列（默认冻结，保护人工成果）")
     ap.add_argument("--no-sheet", action="store_true")
     args = ap.parse_args(argv)
 
@@ -339,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[{spec.name}]")
         try:
             r = build_queue(spec.name, budget=args.budget, force=args.force,
-                            make_sheet=not args.no_sheet)
+                            make_sheet=not args.no_sheet, rewrite=args.rewrite)
             tot += r.get("n_sel", 0)
         except Exception as e:
             print(f"  失败：{type(e).__name__}: {e}")
