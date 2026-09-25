@@ -320,10 +320,18 @@ def build_payload(name: str, inline_images: bool = False,
 
 
 def status_report(names: list[str] | None = None) -> int:
-    """进度 + 一致性体检：人工轴与 PCA 提示轴的差异，衡量提示到底有多少用。"""
+    """进度 + 一致性体检：人工轴与 PCA 提示轴的差异，衡量提示到底有多少用。
+
+    **必须同时看中位数和 p90。** 只报中位数会漏掉最危险的一类错误：
+    PCA 偶尔把次轴当主轴，让整段轴**整体转 90°**，表现为少数帧的巨大偏差。
+    实测 video03 中位 1.26°、看着"尚可"，p90 却是 **80.78°** ——
+    一个照着提示按 `T` 标完的人会静默引入 10 帧的直角错误（详见 §14.10）。
+    所以这里额外报出 |Δ|>30° 的帧数，并在 >0 时给出警告。
+    """
     specs = [C.get(n) for n in names] if names else C.annotation_videos()
-    print(f"{'素材':<9}{'队列':>6}{'已标':>6}{'完成':>7}{'PCA提示 vs 人工(中位|Δ|)':>26}  说明")
-    print("-" * 88)
+    head = f"{'素材':<9}{'队列':>6}{'已标':>6}{'完成':>7}{'提示vs人工 中位':>16}{'p90':>9}{'超30°':>8}  说明"
+    print(head)
+    print("-" * 96)
     tq = td = 0
     for s in specs:
         q = read_queue(s.name)
@@ -333,17 +341,35 @@ def status_report(names: list[str] | None = None) -> int:
         diffs = []
         for i in q:
             if i.k in lab and np.isfinite(i.hint):
-                diffs.append(abs(K.angle_diff(lab[i.k]["axis_deg"], i.hint)) % 180.0)
-        d = f"{np.median(diffs):.1f}°" if diffs else "—"
+                # 用无向轴距离（折在 90°）。早先这里写的是
+                # abs(angle_diff(...)) % 180，那是给有向角的折法，
+                # 会把 0° vs 179° 这类"其实只差 1°"报成 179°。
+                diffs.append(float(K.axis_dist(lab[i.k]["axis_deg"], i.hint)))
+        med = p90 = n_big = None
+        if diffs:
+            arr = np.asarray(diffs)
+            med = float(np.median(arr))
+            p90 = float(np.percentile(arr, 90))
+            n_big = int((arr > 30.0).sum())
         note = ""
         if not q:
             note = "需先跑 select_frames"
-        elif diffs and np.median(diffs) > 30:
-            note = "PCA 提示不可信，必须人工点选"
-        elif diffs:
+        elif not diffs:
+            note = "尚未标注，无法比对提示"
+        elif med > 30:
+            note = "提示整体不可信，必须逐帧人工点选"
+        elif n_big:
+            note = f"有 {n_big} 帧偏离 >30°（疑 90° 分支翻转），勿直接采用"
+        elif p90 > 25:
+            note = "提示尾部偏差偏大，逐帧复核"
+        else:
             note = "PCA 提示尚可，仍以人工为准"
         pc = f"{sum(1 for i in q if i.k in lab) / len(q) * 100:.0f}%" if q else "—"
-        print(f"{s.name:<9}{len(q):>6}{sum(1 for i in q if i.k in lab):>6}{pc:>7}{d:>26}  {note}")
+        f_med = f"{med:.1f}°" if med is not None else "—"
+        f_p90 = f"{p90:.1f}°" if p90 is not None else "—"
+        f_big = f"{n_big}" if n_big is not None else "—"
+        print(f"{s.name:<9}{len(q):>6}{sum(1 for i in q if i.k in lab):>6}{pc:>7}"
+              f"{f_med:>16}{f_p90:>9}{f_big:>8}  {note}")
     print(f"\n合计 {td}/{tq} 帧已标。")
     print(f"标注文件在 {C.ANNOT_DIR.relative_to(C.ROOT)}/，下游由 kinematics.load_annotation_detail 读取。")
     return 0

@@ -9,7 +9,9 @@
     psi_vel  由轨迹的时间导数得到，平滑、可靠，是 M1 的交付物。
     psi_body 是车身轴向（无向量，mod 180°），必须在每帧上独立估计，
              是 L4 的难点，M1 阶段只提供两个基线：
-               (a) 掩膜 PCA 主轴 —— 零标注，但因车辆阴影并入掩膜而噪声很大；
+               (a) 掩膜 PCA 主轴 —— 零标注。两个已知缺陷：掩膜其实是"车辆移动扫过的
+                   月牙形变化带"而非车身轮廓（材料相关的偏置，约 1~9°）；偶尔把次轴
+                   当主轴，造成 ~90° 的分支翻转（已由 resolve_branch_flips 消解）；
                (b) 人工标注 —— 从 outputs/annotations/<name>.csv 读取。
     取"与运动方向夹角 <= 90°"的那一端即为车头，从而自动消解 180° 歧义。
 """
@@ -40,8 +42,23 @@ def wrap360(deg: np.ndarray | float) -> np.ndarray | float:
 
 
 def angle_diff(a: np.ndarray | float, b: np.ndarray | float) -> np.ndarray | float:
-    """a - b，结果落在 (-180, 180]。"""
+    """a - b，结果落在 (-180, 180]。**用于有向角**（psi_vel、psi_body、β）。"""
     return (np.asarray(a) - np.asarray(b) + 180.0) % 360.0 - 180.0
+
+
+def axis_dist(a: np.ndarray | float, b: np.ndarray | float) -> np.ndarray | float:
+    """两条**无向轴**之间的距离，落在 [0, 90]。量"轴线差多少"必须用这个。
+
+    车身轴是 mod 180° 的无向量：0° 与 179° 其实只差 1°。若错用
+    `abs(angle_diff(a, b)) % 180`（angle_diff 折在 180°，是给有向角用的），
+    0° vs 179° 会报成 179° —— 这类虚报会把"尾部偏差"整体放大，
+    让人误判自动轴不可用。实测 video09 的提示轴 p90 因此被报成 169.0°，
+    正确的折法是 11.0°（见 项目规划.md §14.10）。
+
+    注意与 90° 分支翻转的关系：真翻转在两种度量下都是 90°，不会因折法而消失。
+    """
+    return np.abs((np.asarray(a) - np.asarray(b) + 90.0)
+                  % C.BODY_AXIS_MOD - 90.0)
 
 
 def undirected_resolve(axis_deg: np.ndarray | float,
@@ -205,6 +222,85 @@ def smooth(values: np.ndarray, window: int = C.SMOOTH_WINDOW) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# 90° 分支消解
+# ---------------------------------------------------------------------------
+def resolve_branch_flips(axis, *, w_smooth: float = 1.0
+                         ) -> tuple[np.ndarray, int]:
+    """解掉掩膜 PCA 主轴的 90° 分支翻转，返回 (修正后的轴, 被判定翻转的帧数)。
+
+    车身轴是 mod 180° 的无向量，所以「θ」和「θ+90」都形式合法 ——
+    但 PCA 偶尔会把**次轴**当主轴，表现为轴序列里出现 ~90° 的**离散跳变**
+    （video03 实测 k=18 的 135.8° 两帧后跳到 52.7°，真值却是 71.7°→67.9° 平滑）。
+    这是估计错误，不是车身真的转了个直角：25 fps 下 90°/帧 ≈ 2250°/s，
+    远超赛车实际可能的自转速度。
+
+    车身轴物理连续，所以用「让整段序列最平滑的那个分支组合」来消解：
+    逐帧的候选只有 {θ, θ+90} 两个，于是它是一条链上的 2 状态 DP（精确解）。
+
+    代价 = Σ 相邻帧之间的轴变化（折到 ±90° 取绝对值）。
+    锚定项（用颜色轮廓轴做绝对参照）**实测无必要**：权重从 0 扫到 0.6
+    结果完全一致，加大到 1.2 反而变差（轮廓轴自身在 video02/03 上不可靠，
+    见 项目规划.md §14.9）。所以这里只保留平滑项，也省掉了逐帧算轮廓的开销。
+
+    实测（`tools/probe_axis_branch.py`，三段有真值的素材）：
+
+        video03   p90 80.78° → 11.14°，最大 89.60° → 25.96°（判出 10 处翻转）
+        video09   0 处翻转，数值一字不变
+        video02   0 处翻转，数值一字不变
+
+    即**只在需要时动作**。NaN（掩膜失败/位置离群）视为断链，各链独立求解。
+    """
+    a = np.asarray(axis, dtype=float)
+    out = a.copy()
+    idx = np.nonzero(np.isfinite(a))[0]
+    if len(idx) == 0:
+        return out, 0
+
+    # 切成连续有限值的链
+    chains: list[list[int]] = []
+    run = [int(idx[0])]
+    for prev, cur in zip(idx[:-1], idx[1:]):
+        if cur == prev + 1:
+            run.append(int(cur))
+        else:
+            chains.append(run)
+            run = [int(cur)]
+    chains.append(run)
+
+    n_flip = 0
+    for chain in chains:
+        if len(chain) < 2:
+            continue
+        theta = a[chain]
+        cand = np.stack([theta % 180.0, (theta + 90.0) % 180.0])   # (2, m)
+        m = len(chain)
+        INF = 1e18
+        cost = np.full((2, m), INF)
+        back = np.zeros((2, m), dtype=int)
+        cost[:, 0] = 0.0          # 首帧两分支同一起跑线（无历史可比）
+        for j in range(1, m):
+            jump = np.abs((cand[:, j][:, None] - cand[:, j - 1][None, :]
+                           + 90.0) % 180.0 - 90.0)
+            for st in (0, 1):
+                tot = cost[:, j - 1] + w_smooth * jump[st]
+                best = int(np.argmin(tot))
+                cost[st, j] = tot[best]
+                back[st, j] = best
+        st = int(np.argmin(cost[:, m - 1]))
+        sel = np.zeros(m, dtype=int)
+        for j in range(m - 1, -1, -1):
+            sel[j] = st
+            if j:
+                st = int(back[st, j])
+        out[chain] = cand[sel, np.arange(m)]
+        # 数"被转过 90° 的帧数"。**必须含链首帧**：链首两分支代价相同，
+        # 它的分支是回溯定下来的，可能为 1 —— 早先写成 sel[1:].sum()
+        # 会漏掉这一帧（例如 [0,90,90] 实际把首帧转成了 90°，却报 0 处）。
+        n_flip += int(sel.sum())
+    return out, n_flip
+
+
+# ---------------------------------------------------------------------------
 # 主计算
 # ---------------------------------------------------------------------------
 def compute(dets: list[Detection], res: PreprocessResult,
@@ -249,10 +345,15 @@ def compute(dets: list[Detection], res: PreprocessResult,
     # 位置被判为离群的帧
     rejected = np.isnan(cx_r) & ~np.isnan(s["cx_raw"])
 
+    n_flips = 0
     if body_axis is None:
         axis_use = s["axis"]
         # PCA 主轴是从同一个掩膜算出来的，掩膜出错时它一定跟着错，故一并置空
         axis_use = np.where(rejected, np.nan, axis_use)
+        # 再解掉 PCA 把次轴当主轴造成的 90° 分支翻转（见 resolve_branch_flips）。
+        # 必须在 undirected_resolve 之前做：轴被转了 90° 时，"哪端更靠运动方向"
+        # 本身就不成立，先定分支再定车头。
+        axis_use, n_flips = resolve_branch_flips(axis_use)
         axis_kind = np.where(np.isnan(axis_use), 0, 3)
     else:
         axis_use = np.asarray(body_axis, dtype=float)
@@ -275,7 +376,7 @@ def compute(dets: list[Detection], res: PreprocessResult,
     return dict(
         s=s, cx=cx_s, cy=cy_s, vx=vx, vy=vy, speed=speed,
         psi_vel=psi_vel, axis=axis_use, psi_body=psi_body, beta=beta,
-        axis_kind=axis_kind, rejected=rejected,
+        axis_kind=axis_kind, rejected=rejected, n_flips=n_flips,
         dt=dt, size_px=size_px, n_outliers=n_out,
         speed_blps=speed / size_px if size_px and np.isfinite(size_px) else speed * np.nan,
     )

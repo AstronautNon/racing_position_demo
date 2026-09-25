@@ -312,6 +312,11 @@ def write_report(records: list[dict], partial: bool = False,
                 ann_s += f" + {st['interp']} 插值"
         else:
             ann_s = "无（用 PCA 基线）"
+            # PCA 基线的 90° 分支翻转必须报出来：它被消解掉的帧数，
+            # 就是"这个基线本来错得有多离谱"的直接证据。
+            nf = kin.get("n_flips") or 0
+            if nf:
+                ann_s += f"，已消解 {nf} 处 90° 翻转"
         lines.append(f"| {rec['name']} | {span} | {s['max_gap']} 帧 | {out_s} | {sp_s} | "
                      f"{s['covered']}/{s['n']} | {ax_s} | {ann_s} |")
     lines.append("")
