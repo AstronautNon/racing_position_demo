@@ -226,29 +226,38 @@ def smooth(values: np.ndarray, window: int = C.SMOOTH_WINDOW) -> np.ndarray:
 # ---------------------------------------------------------------------------
 def resolve_branch_flips(axis, *, w_smooth: float = 1.0
                          ) -> tuple[np.ndarray, int]:
-    """解掉掩膜 PCA 主轴的 90° 分支翻转，返回 (修正后的轴, 被判定翻转的帧数)。
+    """把轴序列调成「最平滑」的那一支，返回 (调整后的轴, 被转过 90° 的帧数)。
 
-    车身轴是 mod 180° 的无向量，所以「θ」和「θ+90」都形式合法 ——
-    但 PCA 偶尔会把**次轴**当主轴，表现为轴序列里出现 ~90° 的**离散跳变**
-    （video03 实测 k=18 的 135.8° 两帧后跳到 52.7°，真值却是 71.7°→67.9° 平滑）。
-    这是估计错误，不是车身真的转了个直角：25 fps 下 90°/帧 ≈ 2250°/s，
-    远超赛车实际可能的自转速度。
+    ⚠️ **这个函数只保证连续，不保证正确。它解决不了本项目的核心困难。**
 
-    车身轴物理连续，所以用「让整段序列最平滑的那个分支组合」来消解：
-    逐帧的候选只有 {θ, θ+90} 两个，于是它是一条链上的 2 状态 DP（精确解）。
+    车身轴是 mod 180° 的无向量，「θ」与「θ+90」都形式合法；PCA 偶尔把**次轴**
+    当主轴，表现为轴序列里的 ~90° **离散跳变**（video03 实测 k=18 的 135.8° 跳到
+    k=20 的 52.7°，而真值 71.7°→67.9° 是平滑的）。25 fps 下 90°/帧 ≈ 2250°/s，
+    远超赛车实际可能的自转速度，所以这是估计错误，不是车身真转了个直角。
 
-    代价 = Σ 相邻帧之间的轴变化（折到 ±90° 取绝对值）。
-    锚定项（用颜色轮廓轴做绝对参照）**实测无必要**：权重从 0 扫到 0.6
-    结果完全一致，加大到 1.2 反而变差（轮廓轴自身在 video02/03 上不可靠，
-    见 项目规划.md §14.9）。所以这里只保留平滑项，也省掉了逐帧算轮廓的开销。
+    本函数用「让整段序列总变差最小」的分支组合来消解 —— 逐帧候选只有
+    {θ, θ+90} 两个，是一条链上的 2 状态 DP，对该目标是最优解。
 
-    实测（`tools/probe_axis_branch.py`，三段有真值的素材）：
+    **但该目标有两个全局最优解**：整体不翻、整体翻 90°，两者总变差可以完全相同
+    （只要原始序列除一处跳变外是平滑的）。DP 平局时随手取一个，可能整段转错。
+    实测 video03：真值只需翻转开头 ~19 帧，本函数却把后面 238 帧整体转了 90°，
+    误差从「10/45 帧 >30°」恶化到「**45/45 帧全错**」。**用它会比不用更差。**
 
-        video03   p90 80.78° → 11.14°，最大 89.60° → 25.96°（判出 10 处翻转）
-        video09   0 处翻转，数值一字不变
-        video02   0 处翻转，数值一字不变
+    要定下全局分支，必须有**绝对参照**。本项目试过的三条路都不成立：
 
-    即**只在需要时动作**。NaN（掩膜失败/位置离群）视为断链，各链独立求解。
+      · **运动方向**（车身轴更靠航向）—— **不成立**。这是漂移素材，真值 |β| 中位
+        36~64°（video02 达 63.5°），"车身轴靠近运动方向"这个先验在这里是反的。
+      · **外框宽高比符号**（轴对齐外框更宽 ⟺ 轴偏水平）—— 不够准。真值帧上
+        video02 94% / video09 100%，但 video03 只有 **69%**：掩膜退化成月牙带时
+        外框被沿运动方向拉长，符号反映的是运动方向而不是车身轴。
+      · **颜色轮廓轴**（见 项目规划.md §14.9）—— 泛化不达标，不能当绝对参照。
+
+    所以**流水线不调用它**（见 compute()），只拿它当诊断：调它并**丢弃返回值**，
+    即可得到"这段轴里有多少帧落在可疑分支上"。真正的分支判定交给人工标注 ——
+    这正是标注台存在的理由。
+
+    已知边界：单帧真转 90° 会被误判为翻转（25 fps 下不可能；低帧率素材需重估）。
+    NaN（掩膜失败/位置离群）视为断链，各链独立求解。
     """
     a = np.asarray(axis, dtype=float)
     out = a.copy()
@@ -300,6 +309,27 @@ def resolve_branch_flips(axis, *, w_smooth: float = 1.0
     return out, n_flip
 
 
+def count_axis_jumps(axis, *, thresh: float = 45.0) -> int:
+    """数原始轴序列里 > thresh 的相邻跳变处数（NaN 断开相邻关系）。
+
+    为什么用它而不用 resolve_branch_flips 的返回值做诊断：
+    后者的"翻转帧数"依赖于选中的那个全局分支，而全局分支本身是**任意的**
+    （见其 docstring）—— video03 会报 239 处，而原始轴其实只有 1~2 处跳变。
+
+    车身轴物理连续，所以每一处 >45° 的跳变都意味着**分支变了**：它把序列切成
+    两段，其中**必有一段**的分支是错的。至于哪一段错、错多少帧，需要绝对参照
+    才能定，本函数给不出来。所以这个数是「可疑程度」，不是「错误帧数」。
+    实测：video02 / video09 / video01 / video15 为 0（提示可直接参考）；
+    video03 为 1（提示有 10/45 帧偏 90°）；video12 为 3（提示有 4/55 帧偏 90°）。
+    """
+    a = np.asarray(axis, dtype=float)
+    if a.size < 2:
+        return 0
+    d = np.abs((a[1:] - a[:-1] + 90.0) % 180.0 - 90.0)   # 无向轴距离
+    ok = np.isfinite(d)
+    return int((d[ok] > thresh).sum())
+
+
 # ---------------------------------------------------------------------------
 # 主计算
 # ---------------------------------------------------------------------------
@@ -345,15 +375,16 @@ def compute(dets: list[Detection], res: PreprocessResult,
     # 位置被判为离群的帧
     rejected = np.isnan(cx_r) & ~np.isnan(s["cx_raw"])
 
-    n_flips = 0
+    n_axis_jumps = 0
     if body_axis is None:
         axis_use = s["axis"]
         # PCA 主轴是从同一个掩膜算出来的，掩膜出错时它一定跟着错，故一并置空
         axis_use = np.where(rejected, np.nan, axis_use)
-        # 再解掉 PCA 把次轴当主轴造成的 90° 分支翻转（见 resolve_branch_flips）。
-        # 必须在 undirected_resolve 之前做：轴被转了 90° 时，"哪端更靠运动方向"
-        # 本身就不成立，先定分支再定车头。
-        axis_use, n_flips = resolve_branch_flips(axis_use)
+        # 只**诊断**分支翻转（数原始的 >45° 跳变），**不修正**：
+        # resolve_branch_flips 的目标函数有两个全局最优解（整体不翻 / 整体翻 90°），
+        # 无绝对参照时可能整段转错 —— 实测 video03 会把 45/45 帧全部转错 90°，
+        # 比不处理更差。详见该函数 docstring 与 项目规划.md §14.10。
+        n_axis_jumps = count_axis_jumps(axis_use)
         axis_kind = np.where(np.isnan(axis_use), 0, 3)
     else:
         axis_use = np.asarray(body_axis, dtype=float)
@@ -376,7 +407,7 @@ def compute(dets: list[Detection], res: PreprocessResult,
     return dict(
         s=s, cx=cx_s, cy=cy_s, vx=vx, vy=vy, speed=speed,
         psi_vel=psi_vel, axis=axis_use, psi_body=psi_body, beta=beta,
-        axis_kind=axis_kind, rejected=rejected, n_flips=n_flips,
+        axis_kind=axis_kind, rejected=rejected, n_axis_jumps=n_axis_jumps,
         dt=dt, size_px=size_px, n_outliers=n_out,
         speed_blps=speed / size_px if size_px and np.isfinite(size_px) else speed * np.nan,
     )

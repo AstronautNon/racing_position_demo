@@ -368,6 +368,8 @@ def build_queue(name: str, budget: int | None = None, force: bool = False,
         w.writerow([f"# {name} 待标注队列，由 python -m src.select_frames 生成"])
         w.writerow([f"# 共 {len(sel)} 帧（候选 {len(cands)}），按选取顺序排列；"
                     f"hint_axis_deg 是掩膜 PCA 主轴，仅作粗初值，不可当结果"])
+        w.writerow([f"# ⚠ hint 可能**整体差 90°**：PCA 偶尔把次轴当主轴（见 项目规划.md §14.10）。"
+                    f"实测 video03 有 10/45 帧的 hint 偏 90°。按 T 采纳前先看一眼车身朝向，别盲信"])
         w.writerow([f"# 采样准则：最远点采样保证朝向多样性，再补帧保证相邻间隔"
                     f" ≤ {C.ANNOT_SELECT_MAX_GAP} 帧（插值上限 {C.ANNOT_MAX_GAP} 的 75%）。"
                     f"**补进来的帧排在队列末尾（prio 最大），但必须标** —— 跳过就留空洞"])

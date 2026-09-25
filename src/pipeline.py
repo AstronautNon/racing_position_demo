@@ -312,11 +312,12 @@ def write_report(records: list[dict], partial: bool = False,
                 ann_s += f" + {st['interp']} 插值"
         else:
             ann_s = "无（用 PCA 基线）"
-            # PCA 基线的 90° 分支翻转必须报出来：它被消解掉的帧数，
-            # 就是"这个基线本来错得有多离谱"的直接证据。
-            nf = kin.get("n_flips") or 0
-            if nf:
-                ann_s += f"，已消解 {nf} 处 90° 翻转"
+            # PCA 基线的分支可疑度要报出来：>45° 的轴跳变 = 分支变了，
+            # 跳变两侧必有一段的分支是错的（需绝对参照才能定是哪一段）。
+            # 不能报"已修正"—— 平滑项无法唯一确定全局分支（见 §14.10）。
+            nj = kin.get("n_axis_jumps") or 0
+            if nj:
+                ann_s += f"，轴有 {nj} 处 >45° 跳变（分支可疑，需人工确认）"
         lines.append(f"| {rec['name']} | {span} | {s['max_gap']} 帧 | {out_s} | {sp_s} | "
                      f"{s['covered']}/{s['n']} | {ax_s} | {ann_s} |")
     lines.append("")
