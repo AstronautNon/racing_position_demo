@@ -352,6 +352,7 @@ def write_report(records: list[dict], partial: bool = False,
                  "\\|β\\| 中位/p90/max | \\|β\\|>70° | \\|β\\|>85° |")
     lines.append("|---|---|---|---|---|---|---|---|")
     mets: list[tuple[dict, dict]] = []
+    nrt: list[str] = []
     for rec in records:
         kin = rec.get("kin")
         if not kin:
@@ -361,10 +362,17 @@ def write_report(records: list[dict], partial: bool = False,
         resid = "—" if m["resid"] is None else f"{m['resid']:.1f}°"
         r_s = ("—" if not np.isfinite(m["rate_p50"])
                else f"{m['rate_p50']:.2f} / {m['rate_p90']:.2f} °/帧")
-        nsp = len(m["spikes"])
-        sp_s = f"**{nsp}** ⚠" if nsp else "0"
+        nm = rec["name"]
+        if not m["realtime"] and np.isfinite(m["rate_max"]):
+            nrt.append(nm)
+            nm += " ᵃ"
+            # 时间轴非实时 → 不适用物理界，只报最大变化幅度
+            sp_s = f"— 最大 {m['rate_max']:.1f}°/帧"
+        else:
+            nsp = len(m["spikes"])
+            sp_s = f"**{nsp}** ⚠" if nsp else "0"
         lines.append(
-            f"| {rec['name']} | {m['n_human']} | {resid} | {r_s} | {sp_s} | "
+            f"| {nm} | {m['n_human']} | {resid} | {r_s} | {sp_s} | "
             f"{m['b_med']:.1f} / {m['b_p90']:.1f} / {m['b_max']:.1f} ° | "
             f"{100*m['f_near']:.0f}% | {100*m['f_crit']:.1f}% |")
     lines.append("")
@@ -373,6 +381,14 @@ def write_report(records: list[dict], partial: bool = False,
                  f"≈ 5°/帧，所以这个量级只可能是点选错误（或真·自转，需人眼复核）。"
                  f"用 `axis_dist` 度量（人工标的是 mod 180 的无向轴），"
                  f"90° 分支翻转在它底下表现为 ~90° 跳变，一并会被抓出。")
+    if nrt:
+        lines.append(">")
+        lines.append(f"> ᵃ **{('、'.join(nrt))} 的时间轴不是实时的**（原片经过加速/缩时处理），"
+                     "相邻两帧真实间隔大于名义的 1/25 s，**帧间角度变化大是正常的**，"
+                     "上表对它只报变化幅度、不产出「可疑跳变」，`t` 与所有 °/s 也只是名义值。"
+                     "同理，「轴残差」按**名义** 0.5 s 窗口计算，在加速素材上会系统性偏大，"
+                     "不能与实时素材横向比较。"
+                     "详见《项目规划.md》§14.12 与 `src/config.py` 的 `VideoSpec.realtime`。")
     lines.append(">")
     lines.append("> 「\\|β\\|>85°」是**车头朝向最不可信的地方**：`undirected_resolve` 的定头规则是"
                  "「取与运动方向夹角 ≤ 90° 的那一端」，所以车头方向是**由运动方向推出来的、"
@@ -382,7 +398,7 @@ def write_report(records: list[dict], partial: bool = False,
         if m["spikes"]:
             ks = "、".join(f"k={s['k0']}→{s['k1']}（{s['rate']:.1f}°/帧 = {s['dps']:.0f}°/s）"
                            for s in m["spikes"])
-            lines.append(f">")
+            lines.append(">")
             lines.append(f"> ⚠ **{rec['name']} 有 {len(m['spikes'])} 处物理上不可能的轴跳变：{ks}**，"
                          f"轴残差 {m['resid']:.1f}° 也是全项目最高。"
                          f"这些帧的标注需复核后重标（标注台有「跳到 k」可直接跳过去）；"
@@ -395,11 +411,15 @@ def write_report(records: list[dict], partial: bool = False,
     lines.append("   会连成同一个连通域，把框撑大并让质心偏向阴影一侧。")
     lines.append("   目前已用「按差异强度加权的质心」压制（比取掩膜像素质心稳），但没有根治。")
     lines.append("   后果：框尺寸偏大、质心有随车体转动而摆动的小残差 → 速度曲线上有毛刺。")
-    lines.append("2. **video15 有 12% 的帧被判为位置离群。** 剔除后速度曲线从 p90 2168 px/s "
-                 "降到 215 px/s（10 倍），说明原来的尖峰主要是假跳点。")
-    lines.append("   但**这 12% 究竟是「检测被车身阴影带偏」还是「原片本身有快动作段落」，"
-                 "目前尚未区分**。")
-    lines.append("   在人工逐帧看一遍之前，不要引用 video15 的速度绝对值。")
+    lines.append("2. **video15 的时间轴不是实时的，它的「位置离群」判据会误杀真实帧。** "
+                 "该素材原片经过加速处理（用户确认，见 `config.VideoSpec.realtime`），"
+                 "相邻两帧真实间隔大于名义的 1/25 s，所以帧间位移本来就大 —— "
+                 "12% 的帧被判为位置离群、速度 p90 达 2168 px/s，都是**时间被压缩后的名义值**，"
+                 "不是检测错误。后果两点：")
+    lines.append("   (a) 该素材的 px/s、°/s 只是相对量，不要当物理速度引用；")
+    lines.append("   (b) `reject_pose_outliers` 用的是「滑动中值 ± 画面宽 3%」的**绝对**阈值，"
+                 "在时间压缩素材上有把**真实快动作帧**当离群剔除的风险（进而影响 ψ_vel）。"
+                 "该阈值尚未按素材的时间基准调整，属已知待办。")
     lines.append("3. **video12 的轨迹仍不稳。** 位置离群只剔掉 3%，但逐帧位移的 p95/p50 仍达 19"
                  "（video02 为 1.8）。")
     lines.append("   背景模型残留差异约 4%（超过 3% 阈值）：相机在 16.5 s 内缓慢漂移约 23 px，")

@@ -404,11 +404,14 @@ def compute(dets: list[Detection], res: PreprocessResult,
     beta = np.where(np.isnan(psi_vel), np.nan, beta)
 
     size_px = np.nanmedian([max(d.w, d.h) for d in dets]) if dets else float("nan")
+    # realtime 随 kin 一起走：下游（qa_pose / 报告）要靠它决定
+    # 「帧间速率」能不能拿来作物理判定。见 C.VideoSpec.realtime。
+    realtime = bool(getattr(res, "realtime", True))
     return dict(
         s=s, cx=cx_s, cy=cy_s, vx=vx, vy=vy, speed=speed,
         psi_vel=psi_vel, axis=axis_use, psi_body=psi_body, beta=beta,
         axis_kind=axis_kind, rejected=rejected, n_axis_jumps=n_axis_jumps,
-        dt=dt, size_px=size_px, n_outliers=n_out,
+        dt=dt, size_px=size_px, n_outliers=n_out, realtime=realtime,
         speed_blps=speed / size_px if size_px and np.isfinite(size_px) else speed * np.nan,
     )
 

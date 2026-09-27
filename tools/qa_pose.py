@@ -41,19 +41,32 @@ def analyze(name: str, verbose: bool = True) -> dict:
 
     if verbose:
         dt = m["dt"]
+        tag = "" if m["realtime"] else "   ⚠ 时间轴非实时（原片加速）"
         print(f"\n{'='*92}\n{name}   有效 {res.eff_fps:.1f} fps（一帧 {dt*1000:.0f} ms）   "
               f"轴来源：人工 {st['annotated']} / 插值 {st['interp']} / "
-              f"PCA {st['pca']} / 无 {st['none']}\n{'='*92}")
+              f"PCA {st['pca']} / 无 {st['none']}{tag}\n{'='*92}")
         if m["resid"] is not None:
-            print(f"  轴残差（去趋势后抖动）   {m['resid']:.2f}°")
+            note = "" if m["realtime"] else "（按名义 0.5 s 窗口，加速素材上会偏大）"
+            print(f"  轴残差（去趋势后抖动）   {m['resid']:.2f}°{note}")
         else:
             print("  轴残差  —（样本不足）")
         if m["n_human"] >= 2:
-            print(f"  人工帧间变化率 中位 {m['rate_p50']:.2f}°/帧 = {m['rate_p50']/dt:.0f}°/s"
-                  f"   p90 {m['rate_p90']:.2f}°/帧 = {m['rate_p90']/dt:.0f}°/s")
+            if m["realtime"]:
+                print(f"  人工帧间变化率 中位 {m['rate_p50']:.2f}°/帧 = {m['rate_p50']/dt:.0f}°/s"
+                      f"   p90 {m['rate_p90']:.2f}°/帧 = {m['rate_p90']/dt:.0f}°/s")
+            else:
+                print(f"  人工帧间变化率 中位 {m['rate_p50']:.2f}°/帧"
+                      f"   p90 {m['rate_p90']:.2f}°/帧   最大 {m['rate_max']:.2f}°/帧"
+                      f"   （°/s 是名义值，此处不列）")
         else:
             print("  人工帧太少，无法量帧间变化率")
-        if m["spikes"]:
+        if not m["realtime"]:
+            tc = m["top_change"]
+            where = f"（k={tc['k0']}→{tc['k1']}）" if tc else ""
+            print(f"  — 该素材时间轴非实时，帧间变化率**不作物理判定** —— 相邻帧真实间隔"
+                  f"大于 1/25 s，帧间角度变化大属正常{where}。")
+            print("    只报数值、不判对错；如需判定需先知道加速倍率。")
+        elif m["spikes"]:
             print(f"  ⚠ 可疑跳变 {len(m['spikes'])} 处（>{SPIKE_DEG_PER_FRAME}°/帧），"
                   f"逐条复核（真自转 or 点选错误）：")
             for s in m["spikes"]:
@@ -77,14 +90,25 @@ def main(argv: list[str] | None = None) -> int:
           f"{'可疑跳变':>9}{'|β|中位':>9}{'|β|p90':>9}{'|β|>70°':>9}{'|β|>85°':>9}")
     for r in sorted(rows, key=lambda x: -(x["resid"] or 0)):
         resid = "—" if r["resid"] is None else f"{r['resid']:.1f}°"
+        mark = "" if r["realtime"] else " ᵃ"
         r50 = "—" if not np.isfinite(r["rate_p50"]) else f"{r['rate_p50']:.2f}°/帧"
         r90 = "—" if not np.isfinite(r["rate_p90"]) else f"{r['rate_p90']:.2f}°/帧"
-        print(f"{r['name']:<9}{r['n_human']:>7}{resid:>9}{r50:>12}{r90:>11}"
-              f"{len(r['spikes']):>9}{r['b_med']:>8.1f}°{r['b_p90']:>8.1f}°"
+        nsp = f"—ᵃ" if not r["realtime"] else str(len(r["spikes"]))
+        print(f"{r['name'] + mark:<9}{r['n_human']:>7}{resid:>9}{r50:>12}{r90:>11}"
+              f"{nsp:>9}{r['b_med']:>8.1f}°{r['b_p90']:>8.1f}°"
               f"{100*r['f_near']:>8.0f}%{100*r['f_crit']:>8.1f}%")
     print("\n  「轴残差」= 去掉 0.5 s 平滑趋势后的抖动（度），衡量轴序列稳不稳；")
     print(f"  「可疑跳变」= 相邻已标帧之间轴变 >{SPIKE_DEG_PER_FRAME:.0f}°/帧"
           f"（≈500°/s，远超赛车真实自转）。")
+    nrt = [r for r in rows if not r["realtime"]]
+    if nrt:
+        print(f"\n  ᵃ 标记的素材时间轴**非实时**（原片经过加速/缩时处理）：相邻两帧真实间隔"
+              f"大于名义的 1/25 s，")
+        print("     帧间角度变化大属正常，故**不作物理判定**；其 t 与所有 °/s 也只是名义值。")
+        for r in nrt:
+            tc = r["top_change"]
+            where = f"（最大处 k={tc['k0']}→{tc['k1']}，{tc['rate']:.1f}°/帧）" if tc else ""
+            print(f"     {r['name']}：只作参考{where}")
     bad = [r for r in rows if r["spikes"]]
     if bad:
         print(f"\n  ⚠ 有 {len(bad)} 段素材存在可疑跳变，见上方逐条明细 ——")

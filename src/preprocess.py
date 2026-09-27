@@ -63,6 +63,7 @@ class PreprocessResult:
     dup_ratio: float                    # 重复帧比例
     bg_residual_frac: float             # 背景模型残留差异占比（扣掉车辆后）
     camera_static: bool                 # 背景模型是否可用
+    realtime: bool = True               # 原片时间轴是否实时（见 C.VideoSpec.realtime）
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -88,6 +89,11 @@ class PreprocessResult:
         d = json.loads(text)
         for k in ("src_size", "crop", "roi_size", "work_size", "trim"):
             d[k] = tuple(d[k])
+        # realtime 是**素材属性**、不影响预处理数值，所以旧缓存可以直接复用：
+        # 缺这个键时按登记表回填，而不是让旧缓存失效、白跑一遍解码。
+        if "realtime" not in d:
+            spec = C.VIDEOS.get(d.get("name", ""))
+            d["realtime"] = spec.realtime if spec else True
         return cls(**d)
 
     def summary_line(self) -> str:
@@ -262,8 +268,12 @@ def preprocess(spec: C.VideoSpec, force: bool = False) -> PreprocessResult:
                      f"有效时长被压缩到 {raw['t'][-1]:.1f}s，样本量受限")
     if sum(crop) > 0:
         warns.append(f"裁掉黑边 {crop}")
+    if not spec.realtime:
+        warns.append("原片经过加速处理（非实时时间轴）：帧间角度变化天然偏大，"
+                     "不可按实时物理界判定；t 与 °/s 均为名义值")
 
-    res = PreprocessResult(name=spec.name, warnings=warns, **raw)
+    res = PreprocessResult(name=spec.name, warnings=warns,
+                           realtime=spec.realtime, **raw)
     cache.write_text(res.to_json(), encoding="utf-8")
     return res
 
