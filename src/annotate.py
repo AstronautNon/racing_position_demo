@@ -428,6 +428,11 @@ PAGE = r"""<!DOCTYPE html>
   button.primary:hover{filter:brightness(1.08)}
   kbd{font:11px/1 ui-monospace,Menlo,monospace;background:#f0f0ec;border:1px solid var(--line);
     border-bottom-width:2px;border-radius:4px;padding:2px 5px;color:var(--dim)}
+  /* 跳到指定 k：复核质检报出的可疑帧时，靠方向键一帧帧翻太慢 */
+  .jump{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim)}
+  .jump input{width:64px;font:inherit;padding:5px 7px;border:1px solid var(--line);
+    border-radius:6px;background:#fff;color:var(--ink)}
+  .jump input::placeholder{color:#bbb}
   aside{width:286px;flex:0 0 auto;border-left:1px solid var(--line);background:var(--panel);
     overflow:auto;padding:12px}
   .card{border:1px solid var(--line);border-radius:8px;padding:10px 11px;margin-bottom:10px}
@@ -489,6 +494,8 @@ PAGE = r"""<!DOCTYPE html>
         <button id="bHint">用提示轴 <kbd>T</kbd></button>
         <button id="bClear">清除 <kbd>R</kbd></button>
         <button id="bUndo">撤销本帧标注 <kbd>U</kbd></button>
+        <label class="jump">跳到 k <input id="goK" type="number" min="0" step="1"
+          inputmode="numeric" placeholder="帧号" title="输入去重后的帧号 k，回车跳转"></label>
         <div class="spacer" style="flex:1"></div>
         <button id="bSave" class="primary">保存并下一帧 <kbd>Enter</kbd></button>
       </div>
@@ -749,6 +756,19 @@ function nextUnannotated(from){
   }
   return -1;
 }
+// 按 k 跳转。队列里不一定有该 k（质检报的是检出帧号，可能落在两张之间），
+// 那就退到最近的 k，并把实际跳到的 k 回显出来，免得人以为跳错了。
+function jumpToK(){
+  const box = document.getElementById('goK');
+  const want = parseInt(box.value, 10);
+  if (!isFinite(want)){ flash('请输入帧号 k', 'warn'); return; }
+  let best = 0, bd = Infinity;
+  P.items.forEach((it, j) => { const d = Math.abs(it.k - want); if (d < bd){ bd = d; best = j; } });
+  go(best);
+  box.value = '';
+  flash(bd === 0 ? ('已跳到 k=' + P.items[best].k)
+                 : ('队列里没有 k=' + want + '，已跳到最近的 k=' + P.items[best].k), 'warn');
+}
 function flash(msg, kind){
   const t = document.getElementById('toast');
   t.textContent = msg; t.className = 'on' + (kind ? ' ' + kind : '');
@@ -935,6 +955,11 @@ document.addEventListener('keydown', e => {
   else if (k === 'u'){ undo(); }
   else if (k === 'escape'){ pts = []; draw(); }
 });
+
+// ---------- 跳到指定 k ----------
+// change 在回车或失焦时触发；jumpToK 里清空 value 是程序赋值，不会再触发 change
+const goKBox = document.getElementById('goK');
+goKBox.addEventListener('change', () => { if (goKBox.value.trim() !== '') jumpToK(); });
 
 // ---------- 初始化 ----------
 function init(){

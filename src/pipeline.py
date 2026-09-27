@@ -32,6 +32,7 @@ from . import config as C
 from . import detect as D
 from . import kinematics as K
 from . import preprocess as P
+from . import qa_pose as QP
 
 STAGES = ("preprocess", "detect", "kinematics", "all")
 
@@ -230,8 +231,12 @@ def write_report(records: list[dict], partial: bool = False,
         lines.append("> 全量报告请跑 `python -m src.pipeline --all-static`；"
                      "本次结果写在本文件以免覆盖它。")
         lines.append("")
-    lines.append("由 `python -m src.pipeline` 自动生成。本阶段**不需要任何人工标注**，")
-    lines.append("产出的是速度与航向曲线，用来先暴露素材本身的跟踪与比例尺问题。")
+    lines.append("由 `python -m src.pipeline` 自动生成。")
+    lines.append("")
+    lines.append("§1~§3 不需要人工标注：产出预处理、检测、速度与运动方向，"
+                 "用来先暴露素材本身的跟踪问题。"
+                 "§4 是**姿态质量审计**，量的是人工标注的车身轴本身可不可信"
+                 "（车头朝向 ψ_body 只能来自人工标注），以及 β 有没有顶到定头规则的 90° 边界。")
     lines.append("")
     lines.append("## 1. 预处理与检测总览")
     lines.append("")
@@ -337,7 +342,54 @@ def write_report(records: list[dict], partial: bool = False,
                  "不等于人工点选精度，更不等于 β 的精度。")
     lines.append("")
 
-    lines.append("## 4. 已知局限（M1 未解决）")
+    # ---- 姿态质量审计 ----------------------------------------------------
+    # 这一段是「人工标注本身可不可信」的体检，不是检测的体检。放在 §3 之后，
+    # 因为 §3 的「轴残差」只说明轴序列抖不抖，而这里回答更硬的问题：
+    # 有没有物理上不可能的帧间跳变、β 有没有顶到定头规则的边界。
+    lines.append("## 4. 姿态质量审计（车头朝向 / 运动方向）")
+    lines.append("")
+    lines.append("| 素材 | 人工帧 | 轴残差 | 帧间变化率 中位/p90 | 可疑跳变 | "
+                 "\\|β\\| 中位/p90/max | \\|β\\|>70° | \\|β\\|>85° |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    mets: list[tuple[dict, dict]] = []
+    for rec in records:
+        kin = rec.get("kin")
+        if not kin:
+            continue
+        m = QP.pose_metrics(kin)
+        mets.append((rec, m))
+        resid = "—" if m["resid"] is None else f"{m['resid']:.1f}°"
+        r_s = ("—" if not np.isfinite(m["rate_p50"])
+               else f"{m['rate_p50']:.2f} / {m['rate_p90']:.2f} °/帧")
+        nsp = len(m["spikes"])
+        sp_s = f"**{nsp}** ⚠" if nsp else "0"
+        lines.append(
+            f"| {rec['name']} | {m['n_human']} | {resid} | {r_s} | {sp_s} | "
+            f"{m['b_med']:.1f} / {m['b_p90']:.1f} / {m['b_max']:.1f} ° | "
+            f"{100*m['f_near']:.0f}% | {100*m['f_crit']:.1f}% |")
+    lines.append("")
+    lines.append(f"> 「可疑跳变」= 相邻**已标**帧之间的轴变 >{QP.SPIKE_DEG_PER_FRAME:.0f}°/帧"
+                 f"（≈500°/s）。25 fps 下一帧只有 40 ms，漂移车峰值自转约 120°/s "
+                 f"≈ 5°/帧，所以这个量级只可能是点选错误（或真·自转，需人眼复核）。"
+                 f"用 `axis_dist` 度量（人工标的是 mod 180 的无向轴），"
+                 f"90° 分支翻转在它底下表现为 ~90° 跳变，一并会被抓出。")
+    lines.append(">")
+    lines.append("> 「\\|β\\|>85°」是**车头朝向最不可信的地方**：`undirected_resolve` 的定头规则是"
+                 "「取与运动方向夹角 ≤ 90° 的那一端」，所以车头方向是**由运动方向推出来的、"
+                 "不是观测来的**；真·\\|β\\|≥90（车尾朝前滑/自转）时车头会判反 180°，"
+                 "而 β 只会顶在 ±90 上，曲线看不出任何异常。")
+    for rec, m in mets:
+        if m["spikes"]:
+            ks = "、".join(f"k={s['k0']}→{s['k1']}（{s['rate']:.1f}°/帧 = {s['dps']:.0f}°/s）"
+                           for s in m["spikes"])
+            lines.append(f">")
+            lines.append(f"> ⚠ **{rec['name']} 有 {len(m['spikes'])} 处物理上不可能的轴跳变：{ks}**，"
+                         f"轴残差 {m['resid']:.1f}° 也是全项目最高。"
+                         f"这些帧的标注需复核后重标（标注台有「跳到 k」可直接跳过去）；"
+                         f"重标前该段的 β 曲线在对应时刻不可用。")
+    lines.append("")
+
+    lines.append("## 5. 已知局限（M1 未解决）")
     lines.append("")
     lines.append("1. **车身阴影并进检测框。** 顶光角度低时车辆在地面的投影与车身差异都很强，")
     lines.append("   会连成同一个连通域，把框撑大并让质心偏向阴影一侧。")
@@ -353,23 +405,42 @@ def write_report(records: list[dict], partial: bool = False,
     lines.append("   背景模型残留差异约 4%（超过 3% 阈值）：相机在 16.5 s 内缓慢漂移约 23 px，")
     lines.append("   滚动背景只能缓解不能消除。这段素材的检测结果目前只适合看趋势，不适合做定量评估。")
     lines.append("")
-    lines.append("## 5. 需要人工介入的事")
+    lines.append("## 6. 需要人工介入的事")
     lines.append("")
     done = [r for r in records if r.get("annot_count")]
     if done:
-        lines.append("标注进度：" + "、".join(
-            f"`{r['name']}` {r['annot_count']} 帧" for r in done)
-            + "（逐帧来源见上表「标注」列与 `outputs/tracks/<素材名>.csv` 的 `axis_src`）。")
+        tot = sum(r["annot_count"] for r in done)
+        lines.append(f"**姿态标注已全量完成：合计 {tot} 帧**（" + "、".join(
+            f"`{r['name']}` {r['annot_count']}" for r in done)
+            + "）。逐帧来源见上表「标注」列与 `outputs/tracks/<素材名>.csv` 的 `axis_src`。")
         lines.append("")
-    lines.append("1. **车身朝向 ψ_body 必须人工标注。** 尚未标注的素材，其 β 曲线用的是掩膜 PCA 主轴，")
-    lines.append("   而车辆阴影会并进掩膜，使主轴标准差普遍偏大，**不可当结果使用**。")
-    lines.append("   标注文件格式见 `outputs/annotations/README.md`。")
-    lines.append("2. **比例尺尚未标定。** 速度目前是 px/s。要换算成 m/s，需要地面已知尺寸"
-                 "（例如 video03 的靶心圆、video13/14 的轮胎痕圆环）。")
-    lines.append("3. **漏检帧**：背景建模在车辆停住或与背景同色时会丢失目标，"
+    n_item = 0
+    spike_recs = [r for r, m in mets if m["spikes"]]
+    if spike_recs:
+        n_item += 1
+        detail = "；".join(
+            f"`{r['name']}` 的 " + "、".join(f"k={s['k0']}→{s['k1']}" for s in m["spikes"])
+            for r, m in mets if m["spikes"])
+        lines.append(f"{n_item}. **复核物理上不可能的标注跳变（见 §4）：{detail}。**")
+        lines.append("   在标注台里用「跳到 k」直接跳过去重标即可；")
+        lines.append("   重标前，这些帧前后若干帧的 β 由错误标注 + 插值共同决定，不可引用。")
+    n_item += 1
+    lines.append(f"{n_item}. **车身朝向 ψ_body 只能来自人工标注。** 尚未标注的素材，"
+                 "其 β 曲线用的是掩膜 PCA 主轴（表里 video07/08 两行），"
+                 "而车辆阴影会并进掩膜 —— 实测 video15 的 PCA 提示被**系统性带偏约 30°**"
+                 "（中位 29.4°、15/35 帧超过 30°），**不可当结果使用**，"
+                 "详见 §4 的定头说明与《项目规划.md》§14.10。"
+                 "标注文件格式见 `outputs/annotations/README.md`。")
+    n_item += 1
+    lines.append(f"{n_item}. **比例尺尚未标定（本阶段按需求延后）。** 速度目前是 px/s（另有一列"
+                 "「车长/秒」的无量纲速度）。本阶段的交付范围是**姿态**：车头朝向 ψ_body "
+                 "与运动方向 ψ_vel、以及两者之差 β；要换算成 m/s 需要地面已知尺寸"
+                 "（例如 video03 的靶心圆、video13/14 的轮胎痕圆环），已明确**不在本阶段范围**。")
+    n_item += 1
+    lines.append(f"{n_item}. **漏检帧**：背景建模在车辆停住或与背景同色时会丢失目标，"
                  "报告里的「覆盖率」直接反映这一点。")
     lines.append("")
-    lines.append("## 6. 逐素材警告")
+    lines.append("## 7. 逐素材警告")
     lines.append("")
     for r in records:
         ws = r["preprocess"].warnings
@@ -377,7 +448,7 @@ def write_report(records: list[dict], partial: bool = False,
             lines.append(f"- **{r['name']}**：" + "；".join(ws))
     lines.append("")
     if missing:
-        lines.append("## 7. 本次未跑到的素材")
+        lines.append("## 8. 本次未跑到的素材")
         lines.append("")
         lines.append("以下素材在本次运行时**源文件不在 `drift/`**，表中因此没有它们的行。")
         lines.append("它们此前生成的 `outputs/tracks/*.csv` 与曲线图仍在磁盘上，"
