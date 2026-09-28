@@ -27,6 +27,17 @@
      - 真·|β| ≥ 90（车尾朝前滑 / 自转）时，车头会被判反 180°，
        而 β 只会顶在 ±90 上，曲线看不出任何异常；
      - 所以必须报出 |β| 逼近 90° 的帧占比 —— 那才是「车头朝向」不可信的地方。
+
+3. **运动方向 ψ_vel 的可信度（位移信噪比）。**
+   ψ_vel 是位置的数值导数，而位置带着检测噪声 σ_pos。若**帧间位移与 σ_pos
+   同量级，方向就是噪声** —— 此时轴标得再准，β 也只是 ψ_body 减去一个随机数。
+   σ_pos 用「原始位置 − 平滑位置」的高频残差估计，故判据**自适应**，
+   不需要对每段素材手调绝对速度阈值（`C.SPEED_MIN_PXS` 只是个防 0 除的
+   下限，比噪声水平低两个数量级，挡不住这种失效）。
+
+   实测（本项目 6 段）：5 段 SNR 中位 6.5~36，零异常；**video12 为 1.17，
+   且 38/55 个人工标注帧落在 SNR<3 区** —— 它检测质心噪声 2.79px 而帧间
+   位移中位仅 3.27px（慢速漂移 + 掩膜抖动），是该素材 β 不可交付的真因。
 """
 
 from __future__ import annotations
@@ -41,6 +52,40 @@ from . import kinematics as K
 SPIKE_DEG_PER_FRAME = 20.0
 BETA_NEAR = 70.0    # |β| 超过它 → 定头开始不稳
 BETA_CRIT = 85.0    # |β| 超过它 → 车头朝向基本等于抛硬币
+SNR_MIN = 3.0       # 位移信噪比低于它 → ψ_vel 基本是噪声（见 docstring 第 3 条）
+
+
+def psi_vel_quality(kin: dict, window: int = 5) -> dict:
+    """量运动方向 ψ_vel 的可信度：帧间位移相对于检测噪声够不够大。
+
+    速度 = 位置 / 时间，位置上有噪声 σ_pos。位移远大于 σ_pos 时方向可靠；
+    同量级时方向就是噪声。返回逐帧信噪比 `snr = speed·dt / σ_pos`。
+
+    σ_pos 由「原始位置 − Savitzky-Golay 平滑位置」的残差估计，再按
+    `1.4826·√2` 折算成噪声标准差（1.4826 是 MAD→σ 的一致系数，√2 是因为
+    残差 = 信号 − 其平滑值，方差是噪声的两倍）。**这是 σ 的上界**：
+    真实快动作的高频成分也会进残差，所以对低 SNR 的判定偏保守。
+    """
+    dt = float(kin["dt"])
+    s = kin.get("s") or {}
+    cx = np.asarray(s.get("cx_raw", []), dtype=float)
+    cy = np.asarray(s.get("cy_raw", []), dtype=float)
+    sp = np.asarray(kin["speed"], dtype=float)
+    nan = float("nan")
+    if cx.size == 0 or np.count_nonzero(~np.isnan(cx)) < 8:
+        return dict(sigma=nan, snr=np.full(sp.shape, nan),
+                    n_bad=0, frac_bad=nan, n_ann_bad=0, n_ann=0, bad=np.zeros(sp.shape, bool))
+    ok = ~np.isnan(cx)
+    r = np.hypot(cx - K.smooth(cx, window=window), cy - K.smooth(cy, window=window))
+    sigma = float(np.nanmedian(r[ok])) * 1.4826 * np.sqrt(2.0)
+    snr = sp * dt / sigma if sigma > 0 else np.full_like(sp, nan)
+    m = np.isfinite(snr)
+    bad = m & (snr < SNR_MIN)
+    # 人工标注帧是 β 的锚点，其中不可信的帧直接决定"能不能交付"
+    ann = np.asarray(kin["axis_kind"]) == 1
+    return dict(sigma=sigma, snr=snr, bad=bad,
+                n_bad=int(bad.sum()), frac_bad=float(bad.sum() / max(1, m.sum())),
+                n_ann_bad=int((bad & ann & m).sum()), n_ann=int((ann & m).sum()))
 
 
 def pose_metrics(kin: dict, top_spikes: int = 6) -> dict:
@@ -80,6 +125,9 @@ def pose_metrics(kin: dict, top_spikes: int = 6) -> dict:
 
     resid = K.axis_residual_std(axis, dt)
 
+    # 3) 运动方向 ψ_vel 的可信度 --------------------------------------------
+    q = psi_vel_quality(kin)
+
     # 2) β 边界饱和度 -------------------------------------------------------
     beta = np.asarray(kin["beta"], dtype=float)
     ab = np.abs(beta[np.isfinite(beta)])
@@ -94,5 +142,9 @@ def pose_metrics(kin: dict, top_spikes: int = 6) -> dict:
         b_max=float(ab.max()) if ab.size else nan,
         f_near=float(np.mean(ab > BETA_NEAR)) if ab.size else nan,
         f_crit=float(np.mean(ab > BETA_CRIT)) if ab.size else nan,
+        sigma_pos=q["sigma"], snr_med=(float(np.nanmedian(q["snr"]))
+                                       if np.isfinite(q["snr"]).any() else nan),
+        n_vel_bad=q["n_bad"], frac_vel_bad=q["frac_bad"],
+        n_ann_bad=q["n_ann_bad"], n_ann=q["n_ann"],
         dt=dt,
     )

@@ -349,8 +349,8 @@ def write_report(records: list[dict], partial: bool = False,
     lines.append("## 4. 姿态质量审计（车头朝向 / 运动方向）")
     lines.append("")
     lines.append("| 素材 | 人工帧 | 轴残差 | 帧间变化率 中位/p90 | 可疑跳变 | "
-                 "\\|β\\| 中位/p90/max | \\|β\\|>70° | \\|β\\|>85° |")
-    lines.append("|---|---|---|---|---|---|---|---|")
+                 "\\|β\\| 中位/p90/max | \\|β\\|>70° | \\|β\\|>85° | 运动方向可信 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
     mets: list[tuple[dict, dict]] = []
     nrt: list[str] = []
     for rec in records:
@@ -371,10 +371,18 @@ def write_report(records: list[dict], partial: bool = False,
         else:
             nsp = len(m["spikes"])
             sp_s = f"**{nsp}** ⚠" if nsp else "0"
+        # 运动方向可信度：只看**人工标注帧**（β 的锚点）里有多少落在噪声区
+        if not m["n_ann"]:
+            v_s = "—"
+        else:
+            good = m["n_ann"] - m["n_ann_bad"]
+            v_s = f"{good}/{m['n_ann']}"
+            if m["n_ann_bad"]:
+                v_s += " ⚠"
         lines.append(
             f"| {nm} | {m['n_human']} | {resid} | {r_s} | {sp_s} | "
             f"{m['b_med']:.1f} / {m['b_p90']:.1f} / {m['b_max']:.1f} ° | "
-            f"{100*m['f_near']:.0f}% | {100*m['f_crit']:.1f}% |")
+            f"{100*m['f_near']:.0f}% | {100*m['f_crit']:.1f}% | {v_s} |")
     lines.append("")
     lines.append(f"> 「可疑跳变」= 相邻**已标**帧之间的轴变 >{QP.SPIKE_DEG_PER_FRAME:.0f}°/帧"
                  f"（≈500°/s）。25 fps 下一帧只有 40 ms，漂移车峰值自转约 120°/s "
@@ -394,6 +402,14 @@ def write_report(records: list[dict], partial: bool = False,
                  "「取与运动方向夹角 ≤ 90° 的那一端」，所以车头方向是**由运动方向推出来的、"
                  "不是观测来的**；真·\\|β\\|≥90（车尾朝前滑/自转）时车头会判反 180°，"
                  "而 β 只会顶在 ±90 上，曲线看不出任何异常。")
+    lines.append(">")
+    lines.append(f"> 「运动方向可信」= **人工标注帧**里 ψ_vel 的位移信噪比 ≥{QP.SNR_MIN:.0f} 的帧数 / 总数。"
+                 "ψ_vel 是位置的数值导数，而位置带检测噪声 σ_pos；帧间位移与 σ_pos 同量级时，"
+                 "方向就是噪声 —— 此时**轴标得再准，β 也只是 ψ_body 减去一个随机数**。"
+                 f"σ_pos 由「原始位置 − 平滑位置」的残差自适应估计（本项目实测 0.3~2.8 px），"
+                 f"故判据不需对每段素材手调速度阈值（`SPEED_MIN_PXS={C.SPEED_MIN_PXS:g}` 只是防 0 除的下限，"
+                 "比噪声水平低两个数量级，挡不住这种失效）。"
+                 "注：该比值是**纯位移/噪声**，与时间基准无关，因此对加速素材同样成立。")
     for rec, m in mets:
         if m["spikes"]:
             ks = "、".join(f"k={s['k0']}→{s['k1']}（{s['rate']:.1f}°/帧 = {s['dps']:.0f}°/s）"
@@ -403,6 +419,19 @@ def write_report(records: list[dict], partial: bool = False,
                          f"轴残差 {m['resid']:.1f}° 也是全项目最高。"
                          f"这些帧的标注需复核后重标（标注台有「跳到 k」可直接跳过去）；"
                          f"重标前该段的 β 曲线在对应时刻不可用。")
+    for rec, m in mets:
+        if not m["n_ann_bad"]:
+            continue
+        frac = m["n_ann_bad"] / max(1, m["n_ann"])
+        lines.append(">")
+        lines.append(f"> ⚠ **{rec['name']} 的 {m['n_ann_bad']}/{m['n_ann']} 个标注帧"
+                     f"（{100*frac:.0f}%）运动方向不可信**：检测质心噪声 σ_pos="
+                     f"{m['sigma_pos']:.2f} px，而帧间位移中位仅 {m['snr_med']*m['sigma_pos']:.2f} px"
+                     f"（信噪比中位 {m['snr_med']:.2f}）。"
+                     f"该素材的车移动慢、掩膜质心抖，两者同量级 → **β 在这些帧上主要由噪声决定**，"
+                     f"不是轴标错了，而是运动方向这一半没有信息。"
+                     f"它需要更稳的定位（更长的时间基线或更稳的质心估计），"
+                     f"在此之前该素材的 β 不宜作为结论引用。")
     lines.append("")
 
     lines.append("## 5. 已知局限（M1 未解决）")
@@ -411,19 +440,34 @@ def write_report(records: list[dict], partial: bool = False,
     lines.append("   会连成同一个连通域，把框撑大并让质心偏向阴影一侧。")
     lines.append("   目前已用「按差异强度加权的质心」压制（比取掩膜像素质心稳），但没有根治。")
     lines.append("   后果：框尺寸偏大、质心有随车体转动而摆动的小残差 → 速度曲线上有毛刺。")
-    lines.append("2. **video15 的时间轴不是实时的，它的「位置离群」判据会误杀真实帧。** "
-                 "该素材原片经过加速处理（用户确认，见 `config.VideoSpec.realtime`），"
-                 "相邻两帧真实间隔大于名义的 1/25 s，所以帧间位移本来就大 —— "
-                 "12% 的帧被判为位置离群、速度 p90 达 2168 px/s，都是**时间被压缩后的名义值**，"
-                 "不是检测错误。后果两点：")
-    lines.append("   (a) 该素材的 px/s、°/s 只是相对量，不要当物理速度引用；")
-    lines.append("   (b) `reject_pose_outliers` 用的是「滑动中值 ± 画面宽 3%」的**绝对**阈值，"
-                 "在时间压缩素材上有把**真实快动作帧**当离群剔除的风险（进而影响 ψ_vel）。"
-                 "该阈值尚未按素材的时间基准调整，属已知待办。")
-    lines.append("3. **video12 的轨迹仍不稳。** 位置离群只剔掉 3%，但逐帧位移的 p95/p50 仍达 19"
-                 "（video02 为 1.8）。")
-    lines.append("   背景模型残留差异约 4%（超过 3% 阈值）：相机在 16.5 s 内缓慢漂移约 23 px，")
-    lines.append("   滚动背景只能缓解不能消除。这段素材的检测结果目前只适合看趋势，不适合做定量评估。")
+    lines.append("2. **车后拖出的水雾/阴影尾迹会并进掩膜，把检测质心拖离车身。** ")
+    lines.append("   这是第 1 条的加重版：车快速拖动时留下的尾迹与车身差异同样强，")
+    lines.append("   加权质心也压不住。实测 `video15` 开头 k=1~14 的质心偏离车身 **11~90 px**")
+    lines.append("   （中位约 50 px；k≥15 稳定在 3~8 px），且该偏移**随车姿态连续变化**，")
+    lines.append("   不能用一个常数减掉。后果：")
+    lines.append("   (a) 这些帧的 ψ_vel 被污染（实测对 β 的影响约 8°），")
+    lines.append("   (b) **`reject_pose_outliers` 原理上抓不到它** —— 该函数用「偏离滑动中值」")
+    lines.append("   判别离群，而这类污染是**平滑地偏**、不是跳变；它剔掉 k=1~13 是因为那段")
+    lines.append("   轨迹正好弯折（巧合），却**漏掉了 k=14（偏移 63 px，与 k=13 的 49 px 同量级）**，")
+    lines.append("   而 k=14 恰是人工标注的第一帧。")
+    lines.append("   诚实结论：**位置序列平滑 ≠ 位置正确**，所以任何「位置跳变」式判据都无法")
+    lines.append("   发现这种污染。可靠的替代判据（独立的车体中心测量）依赖「车与地面/尾迹")
+    lines.append("   在颜色上可分」这个前提，不通用，故本轮不接入流水线，只作诊断记录。")
+    lines.append("   顺带更正一条此前的错误归因：该素材 12% 的位置离群**不是**「原片加速导致")
+    lines.append("   的名义值」，加速只是让 `px/s` 不能当物理速度引用（见局限 4），")
+    lines.append("   与离群判别无关。")
+    lines.append("3. **video12 的「运动方向」基本没有信息量。** 该素材车移动慢"
+                 "（帧间位移中位 3.3 px）而掩膜质心抖（σ_pos 2.8 px），两者同量级 →")
+    lines.append("   ψ_vel 的方向由噪声决定，55 个人工标注帧里 **38 帧**的信噪比低于 3。")
+    lines.append("   这不是轴标错了（轴是人眼点的），而是 β = ψ_body − ψ_vel 的**后一半**失效。")
+    lines.append("   该素材需要更稳的定位（更长的时间基线、或更稳的质心估计），")
+    lines.append("   在此之前其 β 不宜作为结论引用。另：这段素材相机在 16.5 s 内缓慢漂移约 23 px、")
+    lines.append("   背景残留差异约 4%（超 3% 阈值），滚动背景只能缓解不能消除。")
+    lines.append("4. **非实时素材的 px/s、°/s 只是相对量**（`config.VideoSpec.realtime=False`，"
+                 "当前仅 `video15`）：原片经加速/缩时处理，相邻帧真实间隔大于名义的 1/25 s，")
+    lines.append("   故速度、加速度的绝对值不可引用；但**角度类量（ψ_body、ψ_vel、β）不受影响**，")
+    lines.append("   因为它们是方向、与时间基准无关。§4 的「运动方向可信」同样是纯位移/噪声之比，")
+    lines.append("   对非实时素材一样成立。")
     lines.append("")
     lines.append("## 6. 需要人工介入的事")
     lines.append("")
@@ -444,12 +488,23 @@ def write_report(records: list[dict], partial: bool = False,
         lines.append(f"{n_item}. **复核物理上不可能的标注跳变（见 §4）：{detail}。**")
         lines.append("   在标注台里用「跳到 k」直接跳过去重标即可；")
         lines.append("   重标前，这些帧前后若干帧的 β 由错误标注 + 插值共同决定，不可引用。")
+    vel_bad_recs = [(r, m) for r, m in mets if m["n_ann_bad"]]
+    if vel_bad_recs:
+        n_item += 1
+        detail = "；".join(
+            f"`{r['name']}` 的 {m['n_ann_bad']}/{m['n_ann']} 个标注帧"
+            f"（σ_pos {m['sigma_pos']:.1f} px、信噪比中位 {m['snr_med']:.2f}）"
+            for r, m in vel_bad_recs)
+        lines.append(f"{n_item}. **决定 video12 怎么办（见 §4 与 §5 局限 3）：{detail}。**")
+        lines.append("   它的 β 失来源不是标注、而是运动方向——检测位移与质心噪声同量级。")
+        lines.append("   可选：① 放宽定位（更长的时间基线 / 更稳的质心估计）后重算；")
+        lines.append("   ② 把该素材降为「只看趋势、不作定量」；③ 换用更好的源片。")
     n_item += 1
     lines.append(f"{n_item}. **车身朝向 ψ_body 只能来自人工标注。** 尚未标注的素材，"
                  "其 β 曲线用的是掩膜 PCA 主轴（表里 video07/08 两行），"
                  "而车辆阴影会并进掩膜 —— 实测 video15 的 PCA 提示被**系统性带偏约 30°**"
                  "（中位 29.4°、15/35 帧超过 30°），**不可当结果使用**，"
-                 "详见 §4 的定头说明与《项目规划.md》§14.10。"
+                 "详见 §4 的定头说明与《项目规划.md》§14.11。"
                  "标注文件格式见 `outputs/annotations/README.md`。")
     n_item += 1
     lines.append(f"{n_item}. **比例尺尚未标定（本阶段按需求延后）。** 速度目前是 px/s（另有一列"
