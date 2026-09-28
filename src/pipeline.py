@@ -28,13 +28,15 @@ from pathlib import Path
 
 import numpy as np
 
+from . import annotate as A
 from . import config as C
 from . import detect as D
 from . import kinematics as K
+from . import overlay as OV
 from . import preprocess as P
 from . import qa_pose as QP
 
-STAGES = ("preprocess", "detect", "kinematics", "all")
+STAGES = ("preprocess", "detect", "kinematics", "overlay", "all")
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +215,15 @@ def process_one(spec: C.VideoSpec, stage: str = "all", force: bool = False,
     if kin["s"]["covered"] >= 5:
         plot_kinematics(spec.name, res, kin, C.PLOT_DIR / f"{spec.name}_kinematics.png")
     plot_detect_check(spec.name, spec, res, dets, C.PLOT_DIR / f"{spec.name}_detect_check.png")
+
+    # 叠加视频（交付物 D7）。它是**验收工具**：曲线图看不出"这一帧车头朝哪边"，
+    # 只有把轴画回车身上，人才能一眼判对错。失败不阻断主流程 —— 其余产物仍然有效。
+    if stage in ("overlay", "all"):
+        try:
+            rec["overlay"] = OV.render(spec, res, kin, dets, verbose=verbose)
+        except Exception as e:
+            rec["overlay_error"] = f"{type(e).__name__}: {e}"
+            print(f"  [警告] 叠加视频失败：{rec['overlay_error']}")
     return rec
 
 
@@ -342,6 +353,34 @@ def write_report(records: list[dict], partial: bool = False,
                  "不等于人工点选精度，更不等于 β 的精度。")
     lines.append("")
 
+    # ---- 叠加视频（交付物 D7）--------------------------------------------
+    ov_ok = [r for r in records if r.get("overlay")]
+    ov_bad = [r for r in records if r.get("overlay_error")]
+    if ov_ok or ov_bad:
+        lines.append("### 3.1 姿态叠加视频（交付物 D7）")
+        lines.append("")
+        if ov_ok:
+            lines.append("已生成 " + "、".join(
+                f"`outputs/overlays/{r['name']}_pose.mp4`" for r in ov_ok) + "。")
+            lines.append("")
+            lines.append("画面里那条贴着车身的线就是**估计出来的车身轴**，颜色即它的来源："
+                         "**绿 = 人工标注、橙 = 插值、红 = PCA 基线**；"
+                         "黄色箭头是**运动方向** ψ_vel；左上角是数值面板"
+                         "（β / 车身轴 / 运动方向 / 速度，非实时素材的速度标 `nominal`）；"
+                         "底部是 β 时序带加当前帧游标，**刻度固定 ±90°**，"
+                         "那是结构上界（见 §4 与 README 约定 11）。")
+            lines.append("")
+            lines.append("> 它是**验收工具**，不只是演示物料：曲线图只能看出「β 跳了」，"
+                         "看不出「这一帧车头朝向对不对」。本项目两次最贵的误判"
+                         "（video15 的 PCA 提示偏 30°、k=1~14 的质心被水雾拖偏）"
+                         "都是靠把线画回画面才定论的。**看视频时先看颜色**："
+                         "红色段落是 PCA 基线，其 β 不可当结果。")
+        if ov_bad:
+            lines.append("生成失败：" + "、".join(
+                f"`{r['name']}`（{r['overlay_error']}）" for r in ov_bad)
+                + "；其余产物不受影响。")
+        lines.append("")
+
     # ---- 姿态质量审计 ----------------------------------------------------
     # 这一段是「人工标注本身可不可信」的体检，不是检测的体检。放在 §3 之后，
     # 因为 §3 的「轴残差」只说明轴序列抖不抖，而这里回答更硬的问题：
@@ -456,13 +495,16 @@ def write_report(records: list[dict], partial: bool = False,
     lines.append("   顺带更正一条此前的错误归因：该素材 12% 的位置离群**不是**「原片加速导致")
     lines.append("   的名义值」，加速只是让 `px/s` 不能当物理速度引用（见局限 4），")
     lines.append("   与离群判别无关。")
-    lines.append("3. **video12 的「运动方向」基本没有信息量。** 该素材车移动慢"
-                 "（帧间位移中位 3.3 px）而掩膜质心抖（σ_pos 2.8 px），两者同量级 →")
-    lines.append("   ψ_vel 的方向由噪声决定，55 个人工标注帧里 **38 帧**的信噪比低于 3。")
+    lines.append("3. **video12 的「运动方向」基本没有信息量 —— 已决定搁置（2026-09-28）。**")
+    lines.append("   该素材车移动慢（帧间位移中位 3.3 px）而掩膜质心抖（σ_pos 2.8 px），"
+                 "两者同量级 → ψ_vel 的方向由噪声决定，55 个人工标注帧里 **38 帧**"
+                 "的信噪比低于 3。")
     lines.append("   这不是轴标错了（轴是人眼点的），而是 β = ψ_body − ψ_vel 的**后一半**失效。")
-    lines.append("   该素材需要更稳的定位（更长的时间基线、或更稳的质心估计），")
-    lines.append("   在此之前其 β 不宜作为结论引用。另：这段素材相机在 16.5 s 内缓慢漂移约 23 px、")
-    lines.append("   背景残留差异约 4%（超 3% 阈值），滚动背景只能缓解不能消除。")
+    lines.append("   该素材的 `role` 已置为 `shelved`（见 `src/config.py`）："
+                 "**不纳入本阶段交付集与任何结论，但标注与产物全部保留**，")
+    lines.append("   解法（更长的时间基线、更稳的质心估计、或换源片）留待 M4 之后。")
+    lines.append("   另：这段素材相机在 16.5 s 内缓慢漂移约 23 px、背景残留差异约 4%"
+                 "（超 3% 阈值），滚动背景只能缓解不能消除。")
     lines.append("4. **非实时素材的 px/s、°/s 只是相对量**（`config.VideoSpec.realtime=False`，"
                  "当前仅 `video15`）：原片经加速/缩时处理，相邻帧真实间隔大于名义的 1/25 s，")
     lines.append("   故速度、加速度的绝对值不可引用；但**角度类量（ψ_body、ψ_vel、β）不受影响**，")
@@ -474,9 +516,24 @@ def write_report(records: list[dict], partial: bool = False,
     done = [r for r in records if r.get("annot_count")]
     if done:
         tot = sum(r["annot_count"] for r in done)
-        lines.append(f"**姿态标注已全量完成：合计 {tot} 帧**（" + "、".join(
+        lines.append(f"**本阶段交付集的姿态标注已完成：合计 {tot} 帧**（" + "、".join(
             f"`{r['name']}` {r['annot_count']}" for r in done)
             + "）。逐帧来源见上表「标注」列与 `outputs/tracks/<素材名>.csv` 的 `axis_src`。")
+        lines.append("")
+    # 搁置素材的标注**数据仍在盘上**：不显式列出来，「合计 N 帧」会让人以为
+    # video12 那 55 帧白标了 —— 数据在，只是不纳入本阶段结论。
+    shelved_ann = []
+    for sv in C.static_videos():
+        if sv.role != "shelved":
+            continue
+        n_sv = len(A.read_labels(sv.name))
+        if n_sv:
+            shelved_ann.append(f"`{sv.name}` {n_sv} 帧")
+    if shelved_ann:
+        lines.append("另有**已标注但搁置**的素材：" + "、".join(shelved_ann)
+                     + "。其标注与产物均已生成、**不计入上表与任何结论**；"
+                     "搁置原因见 `src/config.py` 中该素材的 `notes`"
+                     "（video12 是运动方向不可信，见 §5 局限 3 与 README 约定 14）。")
         lines.append("")
     n_item = 0
     spike_recs = [r for r, m in mets if m["spikes"]]

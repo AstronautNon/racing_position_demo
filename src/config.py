@@ -19,15 +19,20 @@ OUT_DIR = ROOT / "outputs"
 PREPROC_DIR = OUT_DIR / "preprocess"
 TRACK_DIR = OUT_DIR / "tracks"
 PLOT_DIR = OUT_DIR / "plots"
+OVERLAY_DIR = OUT_DIR / "overlays"           # 姿态叠加视频（交付物 D7）
 REPORT_DIR = OUT_DIR / "reports"
 ANNOT_DIR = OUT_DIR / "annotations"          # 人工标注（车身轴）落在这里
 ANNOT_QUEUE_DIR = ANNOT_DIR / "queue"        # 待标注帧队列（选帧结果）
 ANNOT_CROP_DIR = ANNOT_DIR / "crops"         # 裁好的待标图（标注台按需生成并缓存）
 ANNOT_WEB_DIR = ANNOT_DIR / "web"            # 离线版标注台导出目录
+# 盲标抽检（独立测试集）：队列在 blind/queue/，标注落在 blind/labels_<名>.csv。
+# **必须与训练用的标注物理隔离** —— 这些帧不参与任何调参，
+# 否则"精度数字"就是用同一批数据自证（项目规划 §10 的风险条）。
+ANNOT_BLIND_DIR = ANNOT_DIR / "blind"
 CACHE_DIR = OUT_DIR / "cache"
 
-for _d in (PREPROC_DIR, TRACK_DIR, PLOT_DIR, REPORT_DIR, ANNOT_DIR,
-           ANNOT_QUEUE_DIR, ANNOT_CROP_DIR, ANNOT_WEB_DIR, CACHE_DIR):
+for _d in (PREPROC_DIR, TRACK_DIR, PLOT_DIR, OVERLAY_DIR, REPORT_DIR, ANNOT_DIR,
+           ANNOT_QUEUE_DIR, ANNOT_CROP_DIR, ANNOT_WEB_DIR, ANNOT_BLIND_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -234,10 +239,19 @@ VIDEOS: dict[str, VideoSpec] = {
                         "用于检验相机运动下的鲁棒性"),
         VideoSpec("video11", "moving", "geotrax", "S2", "hard",
                   notes="与 video10 同源；相机位移 12.8%"),
-        VideoSpec("video12", "static", "bgsub", "S3", "main",
+        # 搁置原因有两种，**看 notes 里写的是哪一种**（都是"不纳入本阶段结论"）：
+        #   · 源片不达标  —— video04/05/06（相机运动+斜视）、video13/14（仅 640x360）
+        #   · 分析质量不足 —— video12（标注没问题，但运动方向没有信息量，见约定 14）
+        VideoSpec("video12", "static", "bgsub", "S3", "shelved",
                   trim_tail=6,
                   notes="正俯视无人机，碎石地定圆，有效 11.6 s（最长）。"
-                        "相机缓慢漂移约 23 px，末尾 6 帧发生镜头切换（已裁）"),
+                        "相机缓慢漂移约 23 px，末尾 6 帧发生镜头切换（已裁）。"
+                        "**2026-09-28 用户决定搁置**：车辆移动慢（速度中位 56 px/s、64% 的帧 <100 px/s），"
+                        "而掩膜质心噪声 σ_pos=2.79 px 与帧间位移中位 3.27 px 同量级 → "
+                        "38/55 个人工标注帧的 ψ_vel 处在噪声主导区（信噪比中位 1.17），"
+                        "β 在这些帧上主要由噪声决定（§5 局限 3、README 约定 14）。"
+                        "**其 55 帧人工标注与产物全部保留**，未纳入本阶段交付结论；"
+                        "解法（更长的时间基线 / 更稳的质心估计 / 换源片）留待 M4 之后"),
         VideoSpec("video13", "static", "bgsub", "S4", "shelved",
                   notes="正俯视八字（动作价值最高），但仅 640x360，车身约 50 px，"
                         "标注精度受限，待回源找 1080p"),
