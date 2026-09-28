@@ -1,6 +1,6 @@
 # 漂移评分系统 · 项目长期记忆
 
-> 详细规则见 `README.md`（十四个关键约定）与 `项目规划.md` §14。这里只放最容易踩的几条。
+> 详细规则见 `README.md`（十五个关键约定）与 `项目规划.md` §14。这里只放最容易踩的几条。
 
 ## 数据来源的可靠性分级
 
@@ -52,13 +52,36 @@
 
 - **只做姿态**：车头朝向 ψ_body、运动方向 ψ_vel、两者之差 β。
 - 比例尺标定与物理单位换算（px/s → m/s）**已明确延后**，不属本阶段。
-- **当前唯一交付级缺陷：video12 的运动方向不可信**（38/55 标注帧 SNR<3），
-  需决定：放宽定位后重算 / 降级为只看趋势 / 换源片。
+- **交付集 = 175 帧**（video01 25 / video02 50 / video03 45 / video09 20 / video15 35）。
+- **video12 已搁置**（`role="shelved"`，2026-09-28 用户决定）：它的运动方向不可信
+  （38/55 标注帧 SNR<3）。**标注与产物全部保留**，但不进 `--all-static`、
+  不计入任何结论；解法（更稳的定位 / 换源片）留待 M4 之后。
+  注意 `shelved` 有两种原因（源片不达标 / 分析质量不足），看 `config.py` 的 notes 分辨。
 - video15 开头 k=1~14 的质心污染只作诊断记录（影响 β 约 8°，其中标注帧仅 k=14）。
+
+## 精度数字只能来自盲标（约定 15）
+
+报误差的帧与调参用的帧**必须两批、物理隔离**。链路：
+
+```
+python tools/build_blind.py                    # 抽 30 帧（队列之外，按 k 均匀铺开）
+python -m src.annotate --serve --blind         # 盲标：无 PCA 提示、也无运动方向箭头
+python tools/score_blind.py                    # → outputs/reports/D8_盲标精度.md
+```
+
+- 盲标标注写 `outputs/annotations/blind/labels_<名>.csv`，**与训练标注分开**。
+- 抽定**不许换**（换采样 = 偷看答案）；规则与帧号在 `blind/MANIFEST.md`。
+- 参照值：**人工点选自身残差约 1.8°**。盲标 MAE 明显高于它 ⇒ 误差来自**插值**，
+  该加密标注而不是换模型。
 
 ## 交付物位置
 
-- 报告 `outputs/reports/M1_报告.md`；曲线 `outputs/plots/*_kinematics.png`；
-  逐帧轨迹 `outputs/tracks/*.csv`；图 `outputs/reports/figures/`。
+- 报告 `outputs/reports/M1_报告.md` 与 `outputs/reports/D8_盲标精度.md`；
+  曲线 `outputs/plots/*_kinematics.png`；逐帧轨迹 `outputs/tracks/*.csv`；
+  **姿态叠加视频 `outputs/overlays/*_pose.mp4`**（交付物 D7，**已 gitignore**，可再生成）；
+  图 `outputs/reports/figures/`。
+- **交付物清单要拿 §1 目标原文逐条对**：叠加视频就是这么漏做的 ——
+  目标与 S2 判定方式里都写了，但清单核对时靠印象，一直到 M1 之后才发现。
 - 工程校验工具在 `tools/`（`qa_pose.py` 姿态审计、`show_trajectory.py` 轨迹形态、
-  `verify_material.py` 素材一致性、`probe_tape_match.py` 母带溯源等）。
+  `build_blind.py`/`score_blind.py` 盲标、`verify_material.py` 素材一致性、
+  `probe_tape_match.py` 母带溯源等）。

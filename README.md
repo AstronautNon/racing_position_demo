@@ -38,10 +38,14 @@ python -m src.annotate --status                              # 只看进度与�
 | `outputs/plots/<名>_kinematics.png` | 轨迹 / 速度 / 航向 / 滑移角 四联图 |
 | `outputs/plots/<名>_detect_check.png` | 检测抽帧目检图（红框=检测框，绿点=质心，黄线=掩膜主轴） |
 | `outputs/plots/<名>_annot_queue.png` | 待标注队列预览（含选帧前后的朝向覆盖对比） |
+| `outputs/overlays/<名>_pose.mp4` | **姿态叠加视频**（交付物 D7）：把车身轴、运动方向、β 画回画面；轴的颜色即来源 |
 | `outputs/reports/M1_报告.md` | 汇总报告（含与 geo-trax 的交叉校验） |
+| `outputs/reports/D8_盲标精度.md` | 盲标精度报告（独立测试集，见约定 15） |
 | `outputs/reports/M1_报告_局部.md` | 只跑部分素材时的报告（避免局部运行覆盖全量报告） |
 | `outputs/annotations/queue/<名>.csv` | 待标注帧队列（选帧结果） |
 | `outputs/annotations/<名>.csv` | **人工标注的车身轴**，格式见 `outputs/annotations/README.md` |
+| `outputs/annotations/blind/queue/<名>.csv` | 盲标抽检队列（独立测试集；提示与运动方向列**留空**） |
+| `outputs/annotations/blind/labels_<名>.csv` | 盲标结果（**与训练标注分开存**，不参与调参） |
 | `outputs/annotations/web/<名>.html` | 离线版标注台（自包含，图片内嵌） |
 
 ---
@@ -57,7 +61,10 @@ src/
   select_frames.py  待标注帧选择（贪心最远点采样）+ 队列预览图
   annotate.py       标注台（浏览器点两下 / 导出自包含 HTML）+ 标注 CSV 读写
   kinematics.py     轨迹平滑、速度、航向 ψ_vel、滑移角 β、人工标注接口
-  pipeline.py       命令行入口，串起上面三层并出图出报告
+  overlay.py        姿态叠加视频：把车身轴/运动方向/β 画回画面（交付物 D7，也是验收工具）
+  qa_pose.py        姿态质量审计的判据本体（报告 §4 与 tools/qa_pose.py 共用）
+  blind.py          盲标抽检：抽帧规则 + 评分本体（独立测试集，见约定 15）
+  pipeline.py       命令行入口，串起上面三层并出图出报告出叠加视频
 tools/
   probe_shadow.py            5 种"在掩膜里压阴影"的变体 vs 人工标注（见 §14.7）
   probe_color_axis.py        月牙掩膜 / 颜色轮廓 / 颜色+凸包 三种轴来源的精度对照
@@ -69,6 +76,8 @@ tools/
   probe_tape_match.py        素材溯源：某段素材是从哪个母带剪的（见 §14.8）
   qa_pose.py                 姿态质量审计：标注的物理可信度 + β 边界饱和度 + 运动方向信噪比
   show_trajectory.py         把检测轨迹叠在工作图上，区分"孤立尖刺"与"平滑偏移"（见约定 13）
+  build_blind.py             抽盲标帧（从标注队列**之外**，见约定 15）
+  score_blind.py             盲标评分：系统交付轴 vs 独立盲标 → MAE（写 D8 报告）
   verify_material.py         核验 drift/ 下素材是否仍是产出标注/轨迹时的那一份
 ```
 
@@ -76,7 +85,7 @@ tools/
 
 ---
 
-## 十四个关键约定（改代码前务必先读）
+## 十五个关键约定（改代码前务必先读）
 
 ### 1. 角度约定
 
@@ -320,6 +329,33 @@ SNR = 帧间位移 / σ_pos = speed · dt / σ_pos
 
 ---
 
+### 15. 精度数字**只能**来自盲标 —— 别用参与调参的数据自证
+
+**报误差的帧与调参用的帧必须是两批，物理隔离。**
+
+现在那 175 帧人工标注**同时**是调参依据和报精度依据 —— 这种情况下数字再好看也不能信
+（项目规划 §1 的 S3、§10 的风险条都写明了这一点）。
+
+盲标抽检的做法与纪律：
+
+- **抽帧**：`python tools/build_blind.py`（默认 30 帧）。只从
+  **已有标注队列之外**的检出帧里取（队列 ∪ 已标，两道都排），按 k 用 `linspace`
+  均匀铺开。规则与帧号写进 `outputs/annotations/blind/MANIFEST.md`。
+- **抽定不许换。** 换采样等于偷看答案。
+- **标注**：`python -m src.annotate --serve --blind`。这个模式下
+  **既不给 PCA 提示、也不给运动方向箭头** —— 只藏提示不够，
+  知道 ψ_vel 就能反推"β 大概多少"，同属泄漏。
+- **落盘隔离**：盲标标注写 `outputs/annotations/blind/labels_<名>.csv`，
+  **与训练标注 `outputs/annotations/<名>.csv` 分开**（`annotate.py` 里靠一个
+  进程级开关切换路径，只在入口设一次）。
+- **评分**：`python tools/score_blind.py` → `outputs/reports/D8_盲标精度.md`。
+
+读数字时注意：系统交付的车身轴是**稀疏标注 + 插值**，所以 MAE 主要来自插值。
+参照值是**人工点选自身的残差约 1.8°**（同一批标注的去趋势残差）——
+盲标 MAE 若明显高于它，说明该**加密标注**，而不是该换模型。
+
+---
+
 ## 双分支检测
 
 | 分支 | 适用 | 做法 |
@@ -464,19 +500,34 @@ SNR = 帧间位移 / σ_pos = speed · dt / σ_pos
       接进 `src/qa_pose.py` 的 `psi_vel_quality()`、报告 §4 新列、`tools/qa_pose.py`。
       实测 6 段中 **video12 单独异常：38/55 个标注帧 SNR<3**（σ_pos 2.79 px
       而帧间位移中位仅 3.27 px），其余五段零异常。
+- [x] **补齐交付物 D7 缺的「叠加视频」**：项目目标写的是"输出滑移角曲线**与叠加视频**"，
+      而此前只有曲线和 CSV，叠加视频一直没做。新增 `src/overlay.py` 与流水线
+      `--stage overlay` 阶段（`--all-static` 默认包含），产出
+      `outputs/overlays/<名>_pose.mp4`：车身轴（**颜色即来源**：绿=人工/橙=插值/红=PCA）、
+      运动方向箭头、β 数值面板、底部 β 时序带（刻度固定 ±90°）。
+      它同时是**验收工具** —— 曲线图看不出"这一帧车头朝向对不对"。
+- [x] **video12 按决定搁置**（`role="shelved"`）：不再进入 `--all-static` 与标注队列，
+      其 55 帧标注与产物**全部保留**，报告 §6 显式列出"已标注但搁置"以免看起来像丢了数据。
+      报告 §5 局限 3 的措辞同步改成"已搁置（决定）"而不是"待解决"。
+- [x] **盲标抽检基建**（约定 15）：`tools/build_blind.py` 抽 30 帧
+      （video01 4 / video02 9 / video03 8 / video09 3 / video15 6，均取自队列**之外**）、
+      `python -m src.annotate --serve --blind` 盲标（**无提示、无运动方向**，
+      落盘到 `blind/labels_<名>.csv`，与训练标注物理隔离）、
+      `tools/score_blind.py` 评分 → `outputs/reports/D8_盲标精度.md`。
+      已用一条假标注端到端验证过链路，并确认训练标注文件未被触碰。
 
 下一步：
 
-- [ ] **决定 video12 怎么办**（当前唯一交付级缺陷，见约定 14 与 §5 局限 3）：
-      它 38/55 个标注帧的运动方向不可信（σ_pos 2.79 px vs 帧间位移 3.27 px）。
-      可选：① 放宽定位（更长的时间基线 / 更稳的质心估计）后重算；
-      ② 该素材降级为「只看趋势、不作定量」；③ 换更好的源片
+- [ ] **标 30 帧盲标**（当前唯一卡住关键路径的事，约 1 小时）：
+      `python -m src.annotate --serve --blind` → 标完 `python tools/score_blind.py`，
+      拿到 MAE 后精度报告（D8）就能落地
+- [ ] **video12 的后续**（搁置不删，见 `config.py` 的 notes）：
+      解法是更稳的定位（更长的时间基线 / 更稳的质心估计）或换源片，留待 M4 之后
 - [ ] **video15 开头 k=1~14 的质心污染需人工确认**（约定 13）：这两段
-      （k=1~13 已被剔除、k=14 漏剔）的 ψ_vel 不可用。若要救，需要独立的
-      车体中心测量；当前只作诊断记录
+      （k=1~13 已被剔除、k=14 漏剔）的 ψ_vel 不可用，实测对 β 影响约 8°。
+      若要救，需要独立的车体中心测量；当前只作诊断记录
 - [ ] 车头朝向的**独立观测**：现在车头是由运动方向推出来的（约定 11），
       若要真正验证，需单独标一次"哪端是车头"
-- [ ] 滑移角 β 的精度评估与盲标误差分析
 - [ ] 相机运动场景（video10/11）的检测能力验证
 - [ ] （延后）比例尺标定：用地面已知尺寸（video03 的靶心圆、video13/14 的轮胎痕圆环）
       把 px/s 换算成 m/s
