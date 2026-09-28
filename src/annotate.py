@@ -89,8 +89,40 @@ class QueueItem:
                 self.cx + self.w / 2, self.cy + self.h / 2)
 
 
+# ---------------------------------------------------------------------------
+# 盲标模式（独立测试集）
+# ---------------------------------------------------------------------------
+# 「盲标抽检」是**唯一**能给出可信精度数字的路子（项目规划 §1 的 S3、§10 的风险条）：
+# 从队列**之外**另抽若干帧，让标注者不看任何提示地独立标一遍，
+# 再与系统输出对比 → 这才是端到端误差。用同一批参与调参的标注去报精度是自证。
+#
+# 实现上是一个**进程级开关**：标注台是单用户本地服务，一个进程只跑一种模式，
+# 所以用模块级状态，不必把 bool 穿过每一层调用。
+# 代价与纪律：**只能在入口（main/serve）设一次**，绝不许在运行中切换 ——
+# 否则读队列与写标注会落到不同的目录，把训练集污染掉。
+_BLIND = False
+
+
+def set_blind(on: bool) -> None:
+    global _BLIND
+    _BLIND = bool(on)
+
+
+def is_blind() -> bool:
+    return _BLIND
+
+
+def blind_queue_path(name: str) -> Path:
+    return C.ANNOT_BLIND_DIR / "queue" / f"{name}.csv"
+
+
+def blind_labels_path(name: str) -> Path:
+    """盲标的人工标注。**与训练标注分开存**，防止被下游误当训练数据读走。"""
+    return C.ANNOT_BLIND_DIR / f"labels_{name}.csv"
+
+
 def queue_path(name: str) -> Path:
-    return C.ANNOT_QUEUE_DIR / f"{name}.csv"
+    return blind_queue_path(name) if _BLIND else C.ANNOT_QUEUE_DIR / f"{name}.csv"
 
 
 def read_queue(name: str) -> list[QueueItem]:
@@ -144,7 +176,8 @@ def read_queue(name: str) -> list[QueueItem]:
 # 标注读写（原子写：标注是人工劳动，不能因为中途崩溃丢掉）
 # ---------------------------------------------------------------------------
 def labels_path(name: str) -> Path:
-    return C.ANNOT_DIR / f"{name}.csv"
+    # 盲标模式读写的**不是**训练标注文件（见模块级 _BLIND 的说明）
+    return blind_labels_path(name) if _BLIND else C.ANNOT_DIR / f"{name}.csv"
 
 
 def read_labels(name: str) -> dict[int, dict]:
@@ -178,6 +211,20 @@ def read_labels(name: str) -> dict[int, dict]:
     return out
 
 
+def read_blind_labels(name: str) -> dict[int, dict]:
+    """读盲标标注（独立测试集）。
+
+    复用同一个解析器，只是把路径切成盲标那份 —— 避免第二份 CSV 解析实现
+    与主解析器慢慢跑偏（格式一改，两处都得改）。
+    """
+    was = _BLIND
+    set_blind(True)
+    try:
+        return read_labels(name)
+    finally:
+        set_blind(was)
+
+
 def write_labels(name: str, labels: dict[int, dict]) -> Path:
     p = labels_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +236,9 @@ def write_labels(name: str, labels: dict[int, dict]) -> Path:
         return p
     with tmp.open("w", newline="", encoding="utf-8") as f:
         f.write(f"# {name} 人工标注的车身轴（mod 180 度），由 python -m src.annotate 生成\n")
+        if _BLIND:
+            f.write("# **盲标抽检（独立测试集）**：标注时未给任何提示，"
+                    "不参与任何调参，只用于 tools/score_blind.py 报精度\n")
         f.write("# axis_deg 是唯一被下游读取的字段；x1..y2 是工作图坐标下的原始点选，供复核\n")
         f.write("# src: manual=人工点选 / hint=人工确认了 PCA 提示轴\n")
         f.write(",".join(LABEL_COLS) + "\n")
@@ -223,7 +273,26 @@ def drop_label(name: str, k: int) -> dict:
 # 载荷：把一帧要用到的东西全部算好，浏览器不再做任何几何
 # ---------------------------------------------------------------------------
 def _finite(seg) -> bool:
+    # 允许 seg 为 None：盲标模式整条提示是 None（没有提示可画），不是错误
+    if not seg:
+        return False
     return all(np.isfinite(v) for pt in seg for v in pt)
+
+
+def _jnum(x, nd: int = 2):
+    """转成 **JSON 安全**的数：NaN / Inf 一律给 None。
+
+    `json.dumps` 会把 NaN 写成裸的 `NaN`（非标准 JSON），而浏览器的
+    `JSON.parse` 遇到它直接抛错、整页白屏。盲标队列的提示列是空的，
+    正好会踩到这个坑，所以数值进载荷前一律过这道关。
+    """
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(v, nd) if np.isfinite(v) else None
 
 
 def fit_segment(seg, iw: float, ih: float, margin: float = 5.0):
@@ -263,10 +332,13 @@ def build_payload(name: str, inline_images: bool = False,
         # 车框一旦越出画面，说明（至少）车身的一部分在画面外，标出来的轴会偏。
         # 选帧时已按"越界幅度占框长边 10%"放宽过，这里再把剩下的如实提示给标注者。
         cut = max(0.0, -x1, -y1, x2 - ww, y2 - wh) > 1.0
+        # 盲标模式：**既不给 PCA 提示、也不给运动方向箭头**。
+        # 只藏提示是不够的 —— 知道运动方向就能反推"β 大概多少度"，
+        # 等于把答案泄漏出去，标出来的数字会朝着系统输出靠。
         hint_seg = CR.axis_segment(qi.cx, qi.cy, qi.hint, max(qi.w, qi.h) * 0.95)
-        hint_disp = [list(v.work_to_disp(*p)) for p in hint_seg]
+        hint_disp = None if _BLIND else [list(v.work_to_disp(*p)) for p in hint_seg]
         vel_disp = None
-        if qi.psi_vel is not None and np.isfinite(qi.psi_vel):
+        if not _BLIND and qi.psi_vel is not None and np.isfinite(qi.psi_vel):
             # 箭头起于车心后方半个车身、指向运动方向、再走 0.9 个车身：
             # 整体落在裁图内（裁图半边长是 0.95 个车身），不会压住车身也裁不掉箭头
             size = max(qi.w, qi.h)
@@ -286,9 +358,9 @@ def build_payload(name: str, inline_images: bool = False,
         out_items.append(dict(
             k=qi.k, frame=qi.frame, t=round(qi.t, 3),
             w=round(qi.w, 1), h=round(qi.h, 1), conf=round(qi.conf, 3),
-            hint=round(qi.hint, 2), cut=bool(cut),
-            psi_vel=None if qi.psi_vel is None else round(qi.psi_vel, 2),
-            speed_blps=None if qi.speed_blps is None else round(qi.speed_blps, 3),
+            hint=None if _BLIND else _jnum(qi.hint), cut=bool(cut),
+            psi_vel=None if _BLIND else _jnum(qi.psi_vel),
+            speed_blps=_jnum(qi.speed_blps, 3),
             img=img,
             view=dict(ox=v.ox, oy=v.oy, sx=v.sx, sy=v.sy, iw=v.iw, ih=v.ih),
             bbox=[bx1, by1, bx2, by2],
@@ -312,9 +384,10 @@ def build_payload(name: str, inline_images: bool = False,
                          role=s.role, note=s.notes[:60]))
     pre = dict(name=name, work_size=list(res.work_size), src_size=list(res.src_size),
                crop=list(res.crop), n=res.n, eff_fps=round(res.eff_fps, 2),
-               warned=bool(res.warnings))
+               warned=bool(res.warnings), blind=_BLIND)
     if verbose:
-        print(f"  {name}: 队列 {len(items)} 帧，其中已标 {sum(1 for i in items if i.k in labels)} 帧")
+        print(f"  {name}: 队列 {len(items)} 帧，其中已标 {sum(1 for i in items if i.k in labels)} 帧"
+              + ("（盲标模式：无提示、无运动方向）" if _BLIND else ""))
     return dict(mode="server" if not inline_images else "standalone",
                 name=name, pre=pre, mats=mats, items=out_items)
 
@@ -549,12 +622,12 @@ PAGE = r"""<!DOCTYPE html>
         <h3>图例</h3>
         <div class="legend">
           <span><i style="border-color:var(--axis)"></i>你的轴</span>
-          <span><i style="border-color:var(--hint);border-top-style:dashed"></i>PCA 提示</span>
+          <span id="hintLegend"><i style="border-color:var(--hint);border-top-style:dashed"></i>PCA 提示</span>
           <span><i style="border-color:var(--vel)"></i>运动方向</span>
           <span><i style="border-color:var(--bad)"></i>检测框</span>
         </div>
         <div class="muted" style="margin-top:6px">
-          <kbd>T</kbd> 采用提示轴（记为 hint，可与人工点选区分）<br>
+          <span id="hintKey"><kbd>T</kbd> 采用提示轴（记为 hint，可与人工点选区分）<br></span>
           <kbd>R</kbd> 清除本帧点选 · <kbd>U</kbd> 撤销已保存<br>
           鼠标拖动或两次单击都能画线；右上角是 3× 放大镜。
         </div>
@@ -963,13 +1036,22 @@ goKBox.addEventListener('change', () => { if (goKBox.value.trim() !== '') jumpTo
 
 // ---------- 初始化 ----------
 function init(){
+  // 盲标模式：把一切可能泄漏答案的东西藏掉（PCA 提示 + 运动方向箭头），
+  // 并在标题上写明，避免标注者把它当成普通标注（这一批是**独立测试集**）。
+  if (P.pre && P.pre.blind){
+    ['hintLegend','hintKey'].forEach(function(id){
+      const el = document.getElementById(id); if (el) el.style.display = 'none';
+    });
+    document.title = '盲标抽检（独立测试集） · ' + P.name;
+  }
   if (P.mode === 'standalone'){
     loadLocal();
     document.getElementById('exportCard').style.display = 'block';
     document.getElementById('exportTip').textContent =
       '标注存在浏览器本地（localStorage），关掉页面也不会丢。';
-    document.getElementById('exportPath').innerHTML =
-      '把下载的 CSV 放到 <code>outputs/annotations/' + P.name + '.csv</code> 即可被下游读取。';
+    document.getElementById('exportPath').innerHTML = P.pre.blind
+      ? '把下载的 CSV 放到 <code>outputs/annotations/blind/labels_' + P.name + '.csv</code> 即可被评分脚本读取。'
+      : '把下载的 CSV 放到 <code>outputs/annotations/' + P.name + '.csv</code> 即可被下游读取。';
     document.getElementById('bDl').onclick = download;
     document.getElementById('bCopy').onclick = () => {
       const t = document.getElementById('csvOut');
@@ -1137,7 +1219,9 @@ class _Handler(BaseHTTPRequestHandler):
                           for s in C.annotation_videos()])
 
 
-def serve(name: str | None = None, port: int = 8765, open_browser: bool = True) -> int:
+def serve(name: str | None = None, port: int = 8765, open_browser: bool = True,
+          blind: bool = False) -> int:
+    set_blind(blind)                 # 必须在任何 read_queue/labels_path 之前
     specs = C.annotation_videos()
     if not specs:
         print("没有登记为可标注的素材。")
@@ -1152,8 +1236,12 @@ def serve(name: str | None = None, port: int = 8765, open_browser: bool = True) 
         print(f"{name} 不在可标注列表 {names}")
         return 1
     if not read_queue(name):
-        print(f"{name} 还没有待标注队列，先生成：")
-        print(f"  python -m src.select_frames --videos {name}")
+        if _BLIND:
+            print(f"{name} 还没有盲标队列，先生成：")
+            print("  python tools/build_blind.py")
+        else:
+            print(f"{name} 还没有待标注队列，先生成：")
+            print(f"  python -m src.select_frames --videos {name}")
         return 1
 
     _Handler.names = names
@@ -1173,11 +1261,13 @@ def serve(name: str | None = None, port: int = 8765, open_browser: bool = True) 
 
     url = f"http://127.0.0.1:{port}/?name={name}"
     print("=" * 62)
-    print("  漂移姿态标注台已启动")
+    print("  盲标抽检台已启动（无提示、无运动方向）" if _BLIND else "  漂移姿态标注台已启动")
     print(f"  地址： {url}")
     print(f"  素材： {name}（{len(read_queue(name))} 帧，已标 {len(read_labels(name))} 帧）")
     print(f"  另可切换： {'、'.join(n for n in names if n != name)}")
     print(f"  标注落盘： {labels_path(name).relative_to(C.ROOT)}")
+    if _BLIND:
+        print("  注意：这是**独立测试集**，标注不参与任何调参，也不会进训练标注文件。")
     print("  停止： Ctrl-C")
     print("=" * 62)
     if open_browser:
@@ -1197,8 +1287,9 @@ def serve(name: str | None = None, port: int = 8765, open_browser: bool = True) 
 def export(name: str, force_crops: bool = False) -> Path:
     payload = build_payload(name, inline_images=True, force_crops=force_crops)
     html = render_page(payload)
-    WEB_DIR.mkdir(parents=True, exist_ok=True)
-    out = WEB_DIR / f"{name}.html"
+    web_dir = (C.ANNOT_BLIND_DIR / "web") if _BLIND else WEB_DIR
+    web_dir.mkdir(parents=True, exist_ok=True)
+    out = web_dir / f"{name}.html"
     out.write_text(html, encoding="utf-8")
     n = len(payload["items"])
     done = sum(1 for i in payload["items"] if i["saved"])
@@ -1213,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
                "  python -m src.annotate --serve --name video02\n"
+               "  python -m src.annotate --serve --name video02 --blind   # 盲标抽检\n"
                "  python -m src.annotate --export --all\n"
                "  python -m src.annotate --status\n")
     g = ap.add_mutually_exclusive_group(required=True)
@@ -1224,12 +1316,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     ap.add_argument("--force", action="store_true", help="忽略裁图与预处理缓存")
+    ap.add_argument("--blind", action="store_true",
+                    help="盲标模式：读 blind/queue/ 的队列，标注存 blind/labels_<名>.csv，"
+                         "且**不显示任何提示与运动方向**（独立测试集，不参与调参）")
     args = ap.parse_args(argv)
+
+    # 盲标是**进程级**开关，只能在入口设一次（见 _BLIND 的说明）
+    set_blind(args.blind)
 
     if args.status:
         return status_report([args.name] if args.name else None)
     if args.serve:
-        return serve(args.name, port=args.port, open_browser=not args.no_open)
+        return serve(args.name, port=args.port, open_browser=not args.no_open,
+                     blind=args.blind)
 
     names = [args.name] if args.name else ([s.name for s in C.annotation_videos()] if args.all else None)
     if not names:
@@ -1243,8 +1342,12 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as e:
             print(f"  {n}: 跳过 —— {e}")
     if ok:
-        print(f"\n用浏览器打开 outputs/annotations/web/<素材名>.html 即可标注（无需服务）。")
-        print("标注后点「导出 CSV」，把文件放到 outputs/annotations/<素材名>.csv。")
+        if args.blind:
+            print("\n用浏览器打开 outputs/annotations/blind/web/<素材名>.html 即可盲标（无需服务）。")
+            print("标注后点「导出 CSV」，把文件放到 outputs/annotations/blind/labels_<素材名>.csv。")
+        else:
+            print("\n用浏览器打开 outputs/annotations/web/<素材名>.html 即可标注（无需服务）。")
+            print("标注后点「导出 CSV」，把文件放到 outputs/annotations/<素材名>.csv。")
     return 0
 
 

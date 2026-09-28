@@ -1,0 +1,6 @@
+# video09 盲标抽检队列（独立测试集，不参与调参），由 tools/build_blind.py 生成
+# 抽样规则：从已有标注队列**之外**的检出帧里按 k 均匀取 N 帧；hint_axis_deg 与 psi_vel_deg 一律留空（盲标：不给任何提示）
+k,frame,t,cx,cy,w,h,conf,hint_axis_deg,psi_vel_deg,speed_blps,prio,img
+0,0,0.0000,326.87,95.22,187.00,129.00,0.2218,,,,0,crops/video09/00000.jpg
+16,18,0.7040,460.95,301.09,159.00,90.00,0.1870,,,,0,crops/video09/00016.jpg
+29,32,1.2760,634.16,412.63,170.00,103.00,0.2020,,,,0,crops/video09/00029.jpg
