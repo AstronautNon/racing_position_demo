@@ -15,8 +15,10 @@
 这样点选时看到的细节最多；再用 `sx/sy` 换算回工作图算角度。
 
 换算之所以能写成 `disp = (work - o) * s` 这种干净形式，是因为裁取矩形的
-四边在 ROI 坐标里取整后，反过来把原点换成 `o = fx0 / sxf`（工作图坐标）
+四边在 ROI 坐标里取整后，反过来把原点换成 `o = (fx0 - l) / sxf`（工作图坐标）
 ——这样取整误差被吸收进 `o`，映射本身保持精确。
+（`fx0` 在**原图**坐标里，`o` 在**工作图**坐标里，所以必须减掉黑边裁移 `l`；
+漏减会让坐标整体平移 `l/sxf`，且角度看不出来 —— 见 `render()` 的注释与 §14.16。）
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ class CropView:
     iw: int            # 显示尺寸（像素）
     ih: int
     work_rect: tuple[float, float, float, float]   # 裁取矩形（工作图坐标）
+    geom: str = ""     # 生成时的几何指纹（见 geom_key）；空串 = 旧缓存，视为失效
 
     def work_to_disp(self, x: float, y: float) -> tuple[float, float]:
         return (x - self.ox) * self.sx, (y - self.oy) * self.sy
@@ -53,14 +56,30 @@ class CropView:
 
     def to_json(self) -> str:
         d = dict(path=str(self.path), ox=self.ox, oy=self.oy, sx=self.sx, sy=self.sy,
-                 iw=self.iw, ih=self.ih, work_rect=list(self.work_rect))
+                 iw=self.iw, ih=self.ih, work_rect=list(self.work_rect), geom=self.geom)
         return json.dumps(d, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, text: str) -> "CropView":
         d = json.loads(text)
         return cls(path=Path(d["path"]), ox=d["ox"], oy=d["oy"], sx=d["sx"], sy=d["sy"],
-                   iw=d["iw"], ih=d["ih"], work_rect=tuple(d["work_rect"]))
+                   iw=d["iw"], ih=d["ih"], work_rect=tuple(d["work_rect"]),
+                   geom=d.get("geom", ""))    # 旧缓存没有这个键 ⇒ 空串 ⇒ 自动重出
+
+
+def geom_key(res: PreprocessResult) -> str:
+    """裁图缓存的有效性指纹。
+
+    `ox/oy` 不是独立量：它由 `res.crop`（黑边裁移）和 `res.work_size` 算出来。
+    这两个一变，**旧缓存里的 ox/oy 就静默错位** —— 裁图里还是那辆车，标注照样能点，
+    只有存下来的坐标整体平移。所以把前提写进缓存、读的时候对一下：
+
+        v.geom != geom_key(res) ⇒ 重出裁图
+
+    触发场景：换素材版本、改黑边检测、改 `work_width_for`。
+    这类"前提变了但缓存还认"的坑与约定 7 同族，区别是这里变的是**几何**而非文件字节。
+    """
+    return f"{tuple(res.crop)}|{tuple(res.work_size)}"
 
 
 def crop_rect_for(res: PreprocessResult, cx: float, cy: float, w: float, h: float,
@@ -116,12 +135,23 @@ def render(res: PreprocessResult, spec: C.VideoSpec, k: int,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
-    # 取整误差全部吸收进原点：o = fx0c / sxf
+    # 取整误差全部吸收进原点：o = (fx0c - l) / sxf
+    #
+    # ⚠ 必须**减掉黑边裁移 l/t**。`fx0c` 是**原图坐标**（render 里 +l/+t 换过去的），
+    # 而 `o` 定义在**工作图坐标**里 —— 两者差着一个黑边裁移。漏减的后果是
+    # 整个裁图的原点平移 `l/sxf` 个**工作图**像素：
+    #   · 标注坐标（disp_to_work）整体偏 `l/sxf`；**角度不受影响**（平移不改方向），
+    #     所以这个 bug 能一路藏到"只看 axis_deg"的项目里不露头；
+    #   · 提示线（work_to_disp）反向偏 `l*scale` 显示像素，可能整条画到裁图外。
+    # video01 的黑边 l=676、sxf=2.001 ⇒ 偏 338 px；其余素材 l≤1 ⇒ 偏不到 1 px，
+    # 这正是它长期没被发现的原因（只有 video01 是大黑边）。见 项目规划 §14.16。
     return CropView(path=out_path,
-                    ox=fx0c / sxf, oy=fy0c / syf,
+                    ox=(fx0c - l) / sxf, oy=(fy0c - t) / syf,
                     sx=dw / cw * sxf, sy=dh / ch * syf,
                     iw=dw, ih=dh,
-                    work_rect=(fx0c / sxf, fy0c / syf, fx1c / sxf, fy1c / syf))
+                    work_rect=((fx0c - l) / sxf, (fy0c - t) / syf,
+                               (fx1c - l) / sxf, (fy1c - t) / syf),
+                    geom=geom_key(res))
 
 
 def crop_path(name: str, k: int) -> Path:
@@ -139,12 +169,16 @@ def ensure(res: PreprocessResult, spec: C.VideoSpec, k: int,
 
     缓存同时存 JPEG 和换算参数 JSON —— 有了 JSON 就不用再碰视频文件，
     标注台重启后翻页是纯读盘，没有解码开销。
+
+    缓存的**有效性**由 `geom_key(res)` 判定（原因见该函数）：几何对不上就重出，
+    否则旧几何的 `ox/oy` 会让标注坐标整体平移。
     """
     jp, mp = crop_path(spec.name, k), meta_path(spec.name, k)
+    want = geom_key(res)
     if not force and jp.exists() and mp.exists():
         try:
             v = CropView.from_json(mp.read_text(encoding="utf-8"))
-            if v.path.exists():
+            if v.path.exists() and v.geom == want:
                 return v
         except (json.JSONDecodeError, KeyError, TypeError):
             pass

@@ -23,8 +23,22 @@
     38/55 个标注帧不可信）。判据是自适应的 `SNR = speed·dt / σ_pos`，
     在 `src/qa_pose.py::psi_vel_quality()`，报告 §4 有「运动方向可信」列。
 
-## 判据之前先问前提
+## 平移类缺陷抓不到（几何别用角度指标验）
 
+- 标注链路曾静默错位：`crops.render()` 的裁图原点漏减黑边裁移，存下的 `x1..y2`
+  整体偏 `l/sxf`（video01 上 338 px），**而 `axis_deg` 完全正常** ——
+  平移不改变方向，所以插值、β、报告、QA 轴残差**全都不报警**。
+  要验这一层只能用**几何断言**：`tools/verify_crops.py`（模板匹配反解映射）
+  或把线画回画面。改了裁切/工作图相关代码后跑一次。
+- 断言本身要**做负对照**：把公式改回错的样子，确认工具会报警
+  （旧写法下 video01 会被报出 780 px 误差，`l=t=0` 的素材零报警）。
+- **缓存要记它依赖的前提。** 裁图缓存带几何指纹 `crops.geom_key=(crop, work_size)`，
+  对不上就重出。只比文件字节不够（约定 7 的 `verify_material.py` 只管字节）。
+- 历史坐标已落后于代码：`tools/migrate_annot_coords.py` 试算 166 行待迁移，
+  **须等标注台关闭再 `--apply`**（它运行时内存里是旧坐标，保存会覆盖迁移）。
+  该工具只动 `x1..y2`，逐帧校验 `axis_deg` 不变。
+
+## 判据之前先问前提
 - **时间基准**：素材是不是实时，登记在 `src/config.py` 的 `VideoSpec.realtime`。
   `False`（如 video15，原片加速过）时，`°/帧`、`°/s`、`px/s`、`t` 全是**名义值**，
   不准用来推断"数据有错"。加速倍率未知就不要臆造换算系数。
@@ -58,6 +72,8 @@
   不计入任何结论；解法（更稳的定位 / 换源片）留待 M4 之后。
   注意 `shelved` 有两种原因（源片不达标 / 分析质量不足），看 `config.py` 的 notes 分辨。
 - video15 开头 k=1~14 的质心污染只作诊断记录（影响 β 约 8°，其中标注帧仅 k=14）。
+  **补救已试尽并否决**（§14.15）：亮度剥阴影只在 video15 上有效，会把最干净的
+  video09 从 14 px 弄差到 33 px；该规则要求"车比污染块亮"，而判断它需要先知道车在哪。
 
 ## 精度数字只能来自盲标（约定 15）
 
@@ -84,4 +100,5 @@ python tools/score_blind.py                    # → outputs/reports/D8_盲标�
   目标与 S2 判定方式里都写了，但清单核对时靠印象，一直到 M1 之后才发现。
 - 工程校验工具在 `tools/`（`qa_pose.py` 姿态审计、`show_trajectory.py` 轨迹形态、
   `build_blind.py`/`score_blind.py` 盲标、`verify_material.py` 素材一致性、
+  `verify_crops.py` 裁图坐标换算、`migrate_annot_coords.py` 标注坐标归一、
   `probe_tape_match.py` 母带溯源等）。

@@ -71,7 +71,8 @@ class BgSubDetector:
 
     def __init__(self, res: PreprocessResult, path: Path,
                  block: int = C.BG_BLOCK, window: int = C.BG_WINDOW,
-                 threshold: int = C.BG_THRESHOLD, weighted_centroid: bool = True):
+                 threshold: int = C.BG_THRESHOLD, weighted_centroid: bool = True,
+                 debug: dict | None = None):
         self.res = res
         self.path = path
         self.block = block
@@ -82,8 +83,15 @@ class BgSubDetector:
         self.weighted_centroid = weighted_centroid
         self.min_area = max(C.MIN_AREA_PX, int(C.MIN_AREA_FRAC * res.work_area))
         self.max_area = int(C.MAX_AREA_FRAC * res.work_area)
+        # 诊断钩子：传入一个 dict，就会按 k 存下「这一帧实际用的连通域掩膜与差异权重图」。
+        # 为什么需要它：位置污染类问题（如 video15 开头水雾尾迹并进掩膜、把质心拖偏）
+        # 必须**看着掩膜**才能定论，而掩膜此前只活在 _detect_one 的局部变量里，
+        # 任何诊断脚本都拿不到 —— 只能靠复刻一遍检测逻辑，那份复刻还不保证与线上一致。
+        # 默认 None ⇒ 不产生任何额外内存与计算。
+        self.debug = debug
 
-    def _detect_one(self, gray: np.ndarray, bg: np.ndarray) -> tuple | None:
+    def _detect_one(self, gray: np.ndarray, bg: np.ndarray,
+                    frame_k: int | None = None) -> tuple | None:
         diff = cv2.absdiff(gray, bg)
         mask = (diff > self.threshold).astype(np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
@@ -131,6 +139,15 @@ class BgSubDetector:
             cx = float(xs.mean()) + x
             cy = float(ys.mean()) + y
 
+        # 诊断留痕：把「这一帧真正用上的掩膜与差异权重」交出去（见 __init__ 的 debug 说明）。
+        # 存的是**选中连通域**在整幅工作图里的形状 —— 质心就是它算出来的，
+        # 所以要查"质心为什么偏了"，要看的正是这一张。
+        if self.debug is not None and frame_k is not None:
+            full = np.zeros(gray.shape, np.uint8)
+            full[y:y + h, x:x + w] = sub.astype(np.uint8)
+            self.debug[frame_k] = dict(mask=full, box=(x, y, w, h),
+                                       weights=diff[y:y + h, x:x + w].copy())
+
         pts = np.stack([xs, ys], 1).astype(np.float32)
         if len(pts) > 2000:                       # 大目标降采样，PCA 结果不受影响
             pts = pts[:: len(pts) // 2000 + 1]
@@ -177,7 +194,7 @@ class BgSubDetector:
                 g = buf.get(k)
                 if g is None:
                     continue
-                got = self._detect_one(g, bg)
+                got = self._detect_one(g, bg, k)
                 if got is None:
                     continue
                 cx, cy, w, h, area, conf, axis = got
