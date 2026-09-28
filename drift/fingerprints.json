@@ -1,0 +1,352 @@
+{
+  "schema": 1,
+  "generated": "2026-09-28",
+  "generator": "tools/material_fingerprint.py",
+  "purpose": "素材文件不入 git（体积 + GitHub 单文件 100 MiB 硬上限，见 README「素材」）。本文件是它们的指纹记录，用来核验「现在 drift/ 里的这份，还是当初产出标注与轨迹的那一份吗」。记录里的 hash 是文件全字节哈希，换分辨率 / 换剪辑点 / 改内容都会变；**改文件名不会变**，故本记录按**文件名**索引。",
+  "total_bytes": 395536305,
+  "files": {
+    "video01.mov": {
+      "bytes": 18607507,
+      "mtime": "2026-09-20 14:37:10",
+      "sha256": "eb08887b49cf042685993bcd4397c5b8dd1666cfef657e710617a8690b5e7d40",
+      "width": 2704,
+      "height": 1756,
+      "frames": 272,
+      "fps": 59.78,
+      "duration_s": 4.55,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S6",
+        "role": "aux",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 272,
+        "kept_n": 77,
+        "eff_fps": 16.923076923076923,
+        "dup_ratio": 0.7169117647058824,
+        "bg_residual_frac": 0.0016898148148148148
+      }
+    },
+    "video02.mov": {
+      "bytes": 35754208,
+      "mtime": "2026-09-20 15:21:20",
+      "sha256": "95912a6066d972617c9952f336e296df4f82854ecee97a88ac6d3315a2577349",
+      "width": 2704,
+      "height": 1756,
+      "frames": 390,
+      "fps": 56.796,
+      "duration_s": 6.87,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S7",
+        "role": "main",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 390,
+        "kept_n": 143,
+        "eff_fps": 20.8252427184466,
+        "dup_ratio": 0.6333333333333333,
+        "bg_residual_frac": 0.004645061728395062
+      }
+    },
+    "video03.mov": {
+      "bytes": 68952761,
+      "mtime": "2026-09-20 15:28:07",
+      "sha256": "c69bfa564f5dc21575ab08852dc5694177c500e4420e1506437dba6accbeb50f",
+      "width": 2704,
+      "height": 1756,
+      "frames": 525,
+      "fps": 59.434,
+      "duration_s": 8.83,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S8",
+        "role": "special",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 525,
+        "kept_n": 258,
+        "eff_fps": 29.20754716981132,
+        "dup_ratio": 0.5085714285714286,
+        "bg_residual_frac": 0.003236882716049383
+      }
+    },
+    "video04.mov": {
+      "bytes": 34976146,
+      "mtime": "2026-09-20 15:31:20",
+      "sha256": "097e7b996245a948fa3bb7ae762720949a25b65efae79ef7a0fd8d1c95a2687b",
+      "width": 912,
+      "height": 1616,
+      "frames": 916,
+      "fps": 59.935,
+      "duration_s": 15.28,
+      "spec": {
+        "camera": "moving",
+        "detector": "geotrax",
+        "source": "S9",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video05.mov": {
+      "bytes": 117378362,
+      "mtime": "2026-09-20 15:36:09",
+      "sha256": "647b607f77ab74470304252e1567bf810d34437547a8655b4813b628269c0185",
+      "width": 2704,
+      "height": 1756,
+      "frames": 1146,
+      "fps": 59.948,
+      "duration_s": 19.12,
+      "spec": {
+        "camera": "moving",
+        "detector": "geotrax",
+        "source": "S10",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video06.mov": {
+      "bytes": 48215001,
+      "mtime": "2026-09-20 15:37:59",
+      "sha256": "04c0c05f3ba034bcc51e82eb39d5afd39dbf8c8d5ef9786dca64be40c104a5a5",
+      "width": 912,
+      "height": 1616,
+      "frames": 1319,
+      "fps": 60.0,
+      "duration_s": 21.98,
+      "spec": {
+        "camera": "moving",
+        "detector": "geotrax",
+        "source": "S11",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video07.mp4": {
+      "bytes": 337844,
+      "mtime": "2026-09-23 16:58:42",
+      "sha256": "b82cdc680b5a8b745bb6cdb48024f914a47a2641c244bdffc1ff7045bb7f3535",
+      "width": 1920,
+      "height": 1080,
+      "frames": 42,
+      "fps": 25.0,
+      "duration_s": 1.68,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S1",
+        "role": "low",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 42,
+        "kept_n": 38,
+        "eff_fps": 22.61904761904762,
+        "dup_ratio": 0.09523809523809523,
+        "bg_residual_frac": 0.0003935185185185185
+      }
+    },
+    "video08.mp4": {
+      "bytes": 1120973,
+      "mtime": "2026-09-23 17:01:00",
+      "sha256": "20fc9b73f9210efc56992ecbb981ddf043150b8515b0543681c0499199798932",
+      "width": 1920,
+      "height": 1080,
+      "frames": 92,
+      "fps": 25.0,
+      "duration_s": 3.68,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S1",
+        "role": "low",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 92,
+        "kept_n": 83,
+        "eff_fps": 22.554347826086957,
+        "dup_ratio": 0.09782608695652173,
+        "bg_residual_frac": 0.00032407407407407406
+      }
+    },
+    "video09.mp4": {
+      "bytes": 1511828,
+      "mtime": "2026-09-23 17:03:37",
+      "sha256": "fa1bd70e68a8eb91f7cd4846c01a9f79ab0a5deba9cc10ccdf3577f10df13f21",
+      "width": 1920,
+      "height": 1080,
+      "frames": 33,
+      "fps": 25.0,
+      "duration_s": 1.32,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S1",
+        "role": "sample",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      },
+      "preprocess": {
+        "total_frames": 33,
+        "kept_n": 30,
+        "eff_fps": 22.727272727272727,
+        "dup_ratio": 0.09090909090909094,
+        "bg_residual_frac": 0.0020910493827160496
+      }
+    },
+    "video10.mp4": {
+      "bytes": 24503281,
+      "mtime": "2026-09-23 17:07:40",
+      "sha256": "96a68ccb7e4df38e0f2a12f8d7934d1256837038541bb0a0018354a1023ea8e7",
+      "width": 1920,
+      "height": 1080,
+      "frames": 479,
+      "fps": 30.0,
+      "duration_s": 15.97,
+      "spec": {
+        "camera": "moving",
+        "detector": "geotrax",
+        "source": "S2",
+        "role": "hard",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video11.mp4": {
+      "bytes": 15731998,
+      "mtime": "2026-09-23 17:09:14",
+      "sha256": "99c2ac73dca3561cd5a39727a4d45233e42743a46a1bef0c6d6c6123b492ef38",
+      "width": 1920,
+      "height": 1080,
+      "frames": 316,
+      "fps": 30.0,
+      "duration_s": 10.53,
+      "spec": {
+        "camera": "moving",
+        "detector": "geotrax",
+        "source": "S2",
+        "role": "hard",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video12.mp4": {
+      "bytes": 20827298,
+      "mtime": "2026-09-23 17:10:44",
+      "sha256": "ff5b81e10c5e4a3e9eff6710f5e4e13c56f959d941da686209aa0cb2cedf7b9b",
+      "width": 1920,
+      "height": 1080,
+      "frames": 421,
+      "fps": 25.0,
+      "duration_s": 16.84,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S3",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 6
+      },
+      "preprocess": {
+        "total_frames": 421,
+        "kept_n": 286,
+        "eff_fps": 17.228915662650603,
+        "dup_ratio": 0.31084337349397595,
+        "bg_residual_frac": 0.041990740740740745
+      }
+    },
+    "video13.mp4": {
+      "bytes": 1076991,
+      "mtime": "2026-09-23 17:12:30",
+      "sha256": "cfc0aa7d233a77d86e3d39be4418b2583f21e350859fdf0e80c84b89b18e1e5d",
+      "width": 640,
+      "height": 360,
+      "frames": 162,
+      "fps": 25.0,
+      "duration_s": 6.48,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S4",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video14.mp4": {
+      "bytes": 598928,
+      "mtime": "2026-09-23 17:14:17",
+      "sha256": "354d4cb60d8fa3044d30efcb30adf0ec98435ca90f5ca2af1cca123ad6a675d1",
+      "width": 640,
+      "height": 360,
+      "frames": 106,
+      "fps": 25.0,
+      "duration_s": 4.24,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S4",
+        "role": "shelved",
+        "realtime": true,
+        "trim_head": 0,
+        "trim_tail": 0
+      }
+    },
+    "video15.mp4": {
+      "bytes": 5943179,
+      "mtime": "2026-09-23 20:20:30",
+      "sha256": "492a55f00403385e379d65d8dd5dfd17e9c0b49cfac548709052343b59340869",
+      "width": 1920,
+      "height": 1080,
+      "frames": 115,
+      "fps": 25.0,
+      "duration_s": 4.6,
+      "spec": {
+        "camera": "static",
+        "detector": "bgsub",
+        "source": "S5",
+        "role": "main",
+        "realtime": false,
+        "trim_head": 0,
+        "trim_tail": 14
+      },
+      "preprocess": {
+        "total_frames": 115,
+        "kept_n": 98,
+        "eff_fps": 24.257425742574256,
+        "dup_ratio": 0.02970297029702973,
+        "bg_residual_frac": 0.004529320987654321
+      }
+    }
+  },
+  "registered_but_absent": [],
+  "unregistered": []
+}

@@ -190,7 +190,8 @@ tools/
   show_concept.py            生成《这套系统在算什么》一节用的概念示意图（README 里的图必须能重新生成）
   build_blind.py             抽盲标帧（从标注队列**之外**，见约定 15）
   score_blind.py             盲标评分：系统交付轴 vs 独立盲标 → MAE（写 D8 报告）
-  verify_material.py         核验 drift/ 下素材是否仍是产出标注/轨迹时的那一份
+  verify_material.py         核验 drift/ 下素材是否仍是产出标注/轨迹时的那一份（逐帧重出裁图比对）
+  material_fingerprint.py    生成/核验 drift/ 素材指纹清单（只看文件本身，见下"素材"一节）
   verify_crops.py            核验"裁图 ↔ 工作图"坐标换算：模板匹配反解映射（见约定 7）
   migrate_annot_coords.py    标注点选坐标归一（平移回正确值，逐帧校验角度不变，见约定 7）
 ```
@@ -274,7 +275,14 @@ ORB + RANSAC 在同一类画面上内点率也会掉到 24%~35%。两者都不�
 换素材（重新下载、换分辨率、换剪辑起点、去字幕重剪）会让这两者同时失效 ——
 **旧标注会静默地算错，而且看起来一切正常**。
 
-所以：换任何素材之后，先跑
+所以：换任何素材之后，先跑**秒级**的指纹核验（不依赖任何缓存，只读文件本身）：
+
+```bash
+/opt/anaconda3/bin/python3 tools/material_fingerprint.py --check
+```
+
+它把 `drift/` 里 15 个文件的 SHA-256 与入库的 [`drift/MANIFEST.md`](drift/MANIFEST.md)
+逐条比对，能直接指出**是哪一个文件**变了。要逐帧定案再跑
 
 ```bash
 /opt/anaconda3/bin/python3 tools/verify_material.py <素材名>   # 或 --all
@@ -286,7 +294,8 @@ ORB + RANSAC 在同一类画面上内点率也会掉到 24%~35%。两者都不�
 
 同理，`outputs/preprocess/<名>.json` 里的 `kept_frames`、`t`、`bg_residual_frac`
 也是很好的素材指纹：`bg_residual_frac` 是背景模型的像素统计量（十几位小数），
-文件只要有一个像素不同就会变。
+文件只要有一个像素不同就会变。（有了上面的指纹清单，这几项退为**辅助**证据 ——
+它们依赖"该素材跑过预处理"这个前提，而指纹清单不依赖。）
 
 **但"文件字节一致"不等于"坐标一致"。** 标注坐标还依赖**工作图几何**
 （黑边裁移 `crop`、工作图宽度），而这一层曾出过一个静默缺陷：裁图原点漏减了黑边裁移，
@@ -666,9 +675,20 @@ SNR = 帧间位移 / σ_pos = speed · dt / σ_pos
       已修 `crops.render()`、给裁图缓存加**几何指纹**、新增 `tools/verify_crops.py`
       （模板匹配反解映射，带负对照：旧写法会被报出 780 px 误差）与
       `tools/migrate_annot_coords.py`（坐标归一，逐帧校验角度不变）。
+- [x] **把"素材为何不入库"写清楚，并补一份入库的指纹清单**：15 段素材合计 377 MiB
+      被 `.gitignore` 排除（`video05.mov` 111.9 MiB 越过 GitHub 单文件 100 MiB 硬上限
+      —— 50 MiB 只是警告线；解开忽略规则也推不上去，且会让整次 push 失败）。
+      新增 `tools/material_fingerprint.py`：只读文件本身算 SHA-256 + 容器元信息，
+      **不依赖任何缓存**，产出 `drift/MANIFEST.md` 与 `drift/fingerprints.json`（两者入库），
+      `--check` 秒级回答"还是当初那一份吗"。带三种负对照（篡改哈希 / 删一条记录 /
+      加一个幽灵文件，全部被抓到）。与 `verify_material.py` 的分工：指纹指出**哪一份**变了，
+      裁图比对逐帧定案。
 
 下一步：
 
+- [ ] **把 `drift/` 另存一份备份**：素材不入库 ⇒ 本地是**唯一副本**，
+      `git` / 本地快照 / Time Machine 都救不回来（§14.8 有一次误删找回的实操记录）。
+      备份时连 `drift/MANIFEST.md` 一起带，日后一条 `--check` 就能确认备份是否完整。
 - [ ] **标 30 帧盲标**（当前唯一卡住关键路径的事，约 1 小时）：
       `python -m src.annotate --serve --blind` → 标完 `python tools/score_blind.py`，
       拿到 MAE 后精度报告（D8）就能落地
@@ -688,17 +708,39 @@ SNR = 帧间位移 / σ_pos = speed · dt / σ_pos
 
 ## 素材
 
-`drift/` 下的视频**不入 git**（约 385 MB，见 `.gitignore`）。
-素材清单、体检结论、可用性与推荐用途见 [`项目规划.md`](项目规划.md) §13。
-母带来源（哪段素材是从哪个下载文件剪的）见 §14.8。
+`drift/` 下的 15 段视频**不入 git**（合计 377 MiB，见 `.gitignore`）。三条原因：
+
+1. **它本身就过不了 GitHub 的门** —— `video05.mov` 111.9 MiB 越过单文件
+   **100 MiB 硬上限**（50 MiB 只是警告线），服务端会拒收，并让**整次 push 失败**；
+2. **仓库会复利膨胀** —— git 存全量快照，素材换一次（重下/重剪/去字幕）就再存一整份，
+   而 GitHub 建议仓库 <1 GB；
+3. **它们是"输入"不是"产出"** —— 不由本项目生成，可从原始来源重新获取。
+
+素材清单、体检结论、可用性与推荐用途见 [`项目规划.md`](项目规划.md) §13；
+母带来源（哪段素材是从哪个下载文件剪的）见 §14.8；
+**逐文件的指纹（大小 / SHA-256 / 分辨率 / 帧数 / 时长）见
+[`drift/MANIFEST.md`](drift/MANIFEST.md)**（机器可读版在同目录 `fingerprints.json`）。
 
 **素材不入库 ⇒ 删了就真没了，git 救不回来**（`git log`/`reflog`/悬空对象里都没有视频，
 因为从未 `add` 过；本地快照与 Time Machine 也不覆盖）。所以：
 
+- **换过素材之后，先跑一次指纹核验**（秒级）：
+
+  ```bash
+  /opt/anaconda3/bin/python3 tools/material_fingerprint.py --check
+  ```
+
+  退出码 0 ＝ `drift/` 里还是当初那一份，标注可沿用；1 ＝ 有文件变了 / 缺失 /
+  清单未覆盖，该素材的标注按约定 7 作废重标。**报"变了"再跑
+  `tools/verify_material.py`**（逐帧重出裁图比对，分钟级）定案 —— 指纹负责"哪一份"，
+  裁图比对负责"逐帧确认"。
 - 不要手改 `drift/` 下的文件名。改名会让 `config.py` 找不到文件，
   而**改名后内容一样时最危险** —— 报告会静默少一行，看起来像"素材本来就没有"。
-- 换过素材（重下、重剪、去字幕）之后，先跑 `tools/verify_material.py` 确认
-  与旧标注仍对应（见约定 §7），再动标注。
+  （指纹按**文件名**索引，所以改名后核验会报"缺失 + 新增"，这正是想要的行为。）
 - 万一误删：先用元信息当指纹在全盘找（分辨率 / fps / 帧数 / 时长四元组，
-  从 `outputs/preprocess/<名>.json` 读），找到候选后**必须做内容验证**，
-  别信"元信息吻合"。§14.8 是一次完整的实操记录。
+  从 `outputs/preprocess/<名>.json` 读），找到候选后**必须做内容验证** ——
+  最省事的做法是把候选放回 `drift/` 原文件名、跑一次 `--check`。
+  §14.8 是一次完整的实操记录。
+
+真要对外分发素材，别解开 `.gitignore`：走 **GitHub Release 附件**（官方对大二进制的
+建议做法，仓库不膨胀）或 **Git LFS**（免费额度 10 GiB 够放）。
